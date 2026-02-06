@@ -1,0 +1,683 @@
+/**
+ * Integrated test script - Single browser instance for full process
+ * 
+ * Usage: 
+ *   yarn test:integrated                                    - Run full automated process (using filterDate in config or none)
+ *   yarn test:integrated --date=YYYY-MM-DD                  - Run process filtering by this date (overrides config.filterDate)
+ *   yarn test:integrated --accounts=account1,account2       - Run process only for specified accounts (comma-separated usernames)
+ *   yarn test:integrated --account=account1,account2        - Same as --accounts (both singular and plural work)
+ *   yarn test:integrated --date=YYYY-MM-DD --accounts=...   - Combine both parameters (filter by date AND specific accounts)
+ *   yarn test:integrated --setup                            - Open browser for manual configuration (no automation)
+ *   yarn test:integrated --config                           - Same as --setup
+ * 
+ * Examples:
+ *   # Process only specific accounts
+ *   yarn test:integrated --accounts=carrot.orders@weknock.com,rice@weknock.com
+ *   
+ *   # Process with date filter only
+ *   yarn test:integrated --date=2026-02-03
+ *   
+ *   # Combine both: process specific accounts with date filter
+ *   yarn test:integrated --date=2026-02-03 --accounts=pincho.catering@weknock.com,rice@weknock.com
+ * 
+ * Note: Parameters can be combined. When using --date and --accounts together:
+ *   - --date filters orders by the specified date
+ *   - --accounts limits processing to only the specified accounts
+ *   - Both filters are applied simultaneously
+ * 
+ * This script performs the complete flow in a SINGLE browser instance:
+ * - Login (con 2FA via Gmail)
+ * - Navigate to Completed
+ * - Filter by date and order codes
+ * - Analyze orders (Delivery Issue check)
+ * - Statistics per account and global
+ * 
+ * Setup mode: Opens browser without any automation, allowing manual configuration
+ *             of Gmail accounts or other necessary settings.
+ * 
+ * Based on test-login.ts structure but extended with full order processing
+ */
+
+import puppeteer from 'puppeteer';
+import { 
+  loadConfig, 
+  isLoggedIn, 
+  performLogin, 
+  logMessage,
+  waitRandomTime,
+  type BotConfig,
+  type Account,
+  initBrowser,
+  type InitBrowserResult,
+  performLogout,
+  clickCompletedButton,
+  filterOrdersByDate,
+  filterOrdersByCodes,
+  getOrderCodesFromConfig,
+  clickMatchingOrderLinks,
+  searchAndClickOrderCodes,
+  displayStatistics,
+  type OrderResult,
+  initializeLogFile,
+  cleanupBrowserTabs
+} from './main.js';
+
+// Initialize global results array
+(global as any).orderResults = [] as OrderResult[];
+
+/**
+ * Check if script is running in setup/config mode
+ */
+function isSetupMode(): boolean {
+  const args = process.argv.slice(2);
+  return args.includes('--setup') || args.includes('--config') || args.includes('-s');
+}
+
+/**
+ * Get CLI date argument (e.g., --date=2026-01-28)
+ */
+function getCliDateArg(): string | null {
+  const args = process.argv.slice(2);
+  const dateArg = args.find(a => a.startsWith('--date='));
+  if (!dateArg) return null;
+
+  const value = dateArg.split('=')[1]?.trim();
+  if (!value) return null;
+
+  // Basic validation: YYYY-MM-DD
+  const match = /^\d{4}-\d{2}-\d{2}$/.test(value);
+  return match ? value : null;
+}
+
+/**
+ * Get CLI accounts argument (e.g., --accounts=account1,account2,account3 or --account=account1,account2)
+ * Supports both --account (singular) and --accounts (plural) for flexibility
+ * Returns array of account usernames to filter, or null if not specified
+ */
+function getCliAccountsArg(): string[] | null {
+  const args = process.argv.slice(2);
+  // Support both --account and --accounts
+  const accountsArg = args.find(a => a.startsWith('--accounts=') || a.startsWith('--account='));
+  if (!accountsArg) return null;
+
+  const value = accountsArg.split('=')[1]?.trim();
+  if (!value) return null;
+
+  // Split by comma and trim each account name
+  const accounts = value.split(',').map(acc => acc.trim()).filter(acc => acc.length > 0);
+  return accounts.length > 0 ? accounts : null;
+}
+
+/**
+ * Setup mode: Open browser for manual configuration
+ */
+async function setupMode(): Promise<void> {
+  let browser: puppeteer.Browser | null = null;
+  let page: puppeteer.Page | null = null;
+
+  try {
+    logMessage('=== SETUP MODE: Manual Configuration ===');
+    logMessage('');
+    logMessage('This mode opens the browser WITHOUT any automation.');
+    logMessage('You can manually configure:');
+    logMessage('  - Gmail accounts (login to Gmail)');
+    logMessage('  - ezCater accounts');
+    logMessage('  - Any other necessary settings');
+    logMessage('');
+    logMessage('The browser will remain open until you close it manually.');
+    logMessage('Press Ctrl+C in the terminal to close the browser and exit.');
+    logMessage('');
+
+    // Load configuration
+    logMessage('Loading configuration...');
+    const config = loadConfig();
+    
+    // Initialize log file system
+    initializeLogFile(config);
+
+    // Initialize browser
+    logMessage('Initializing browser (using BrowserPool/initBrowser)...');
+    const browserResult: InitBrowserResult = await initBrowser(config.task.url, 'default');
+
+    if (!browserResult.browser || !browserResult.page) {
+      logMessage(`ERROR: Failed to initialize browser: ${browserResult.error ?? 'Unknown error'}`, 'ERROR');
+      process.exit(1);
+    }
+
+    browser = browserResult.browser;
+    page = browserResult.page;
+
+    logMessage('✓ Browser initialized');
+    logMessage('');
+    logMessage('=== Browser is now open for manual configuration ===');
+    logMessage('  → Navigate to Gmail: https://mail.google.com');
+    logMessage('  → Navigate to ezCater: https://www.ezcater.com/caterer_portal/sign_in');
+    logMessage('  → Configure any accounts or settings you need');
+    logMessage('');
+    logMessage('The browser will stay open. Close it manually or press Ctrl+C to exit.');
+    logMessage('');
+
+    // Keep browser open indefinitely until user closes it or presses Ctrl+C
+    // Set up signal handlers to close browser gracefully
+    const closeBrowser = async () => {
+      if (browser) {
+        logMessage('');
+        logMessage('Closing browser...');
+        await browser.close();
+        logMessage('Browser closed. Exiting setup mode.');
+        process.exit(0);
+      }
+    };
+
+    process.on('SIGINT', closeBrowser);
+    process.on('SIGTERM', closeBrowser);
+
+    // Wait indefinitely (user will close browser manually or press Ctrl+C)
+    await new Promise(() => {
+      // This promise never resolves, keeping the process alive
+    });
+
+  } catch (error: any) {
+    logMessage(`Setup mode error: ${error.message}`, 'ERROR');
+    logMessage(error.stack, 'ERROR');
+    if (browser) {
+      await browser.close();
+    }
+    process.exit(1);
+  }
+}
+
+/**
+ * Main integrated test function - Single browser instance for everything
+ */
+async function testIntegrated(): Promise<void> {
+  let browser: puppeteer.Browser | null = null;
+  let page: puppeteer.Page | null = null;
+  let profile: any = null; // BrowserProfile from InitBrowserResult
+
+  try {
+    logMessage('=== Starting INTEGRATED Test (Single Browser Instance) ===');
+    logMessage('');
+
+    // Step 1: Load configuration
+    logMessage('Step 1: Loading configuration...');
+    const config = loadConfig();
+    
+    // Override filterDate from CLI if provided
+    const cliDate = getCliDateArg();
+    if (cliDate) {
+      config.task.filterDate = cliDate;
+      logMessage(`Overriding filter date from CLI: ${cliDate}`);
+    }
+    
+    // Initialize log file system
+    initializeLogFile(config);
+
+    if (!config.accounts || config.accounts.length === 0) {
+      logMessage('ERROR: No accounts configured in YAML file', 'ERROR');
+      logMessage('Please add accounts section to config/ezcater_web_establishment_bot.yaml', 'ERROR');
+      process.exit(1);
+    }
+
+    if (!config.gmail) {
+      logMessage('ERROR: Gmail configuration not found in YAML file', 'ERROR');
+      logMessage('Please add gmail section to config/ezcater_web_establishment_bot.yaml', 'ERROR');
+      process.exit(1);
+    }
+
+    // Filter accounts based on CLI argument if provided
+    const cliAccounts = getCliAccountsArg();
+    let accountsToProcess = config.accounts;
+    
+    if (cliAccounts) {
+      logMessage(`Filtering accounts based on CLI argument: ${cliAccounts.join(', ')}`);
+      const cliAccountsSet = new Set(cliAccounts.map(acc => acc.toLowerCase()));
+      accountsToProcess = config.accounts.filter(account => 
+        cliAccountsSet.has(account.username.toLowerCase())
+      );
+      
+      if (accountsToProcess.length === 0) {
+        logMessage('ERROR: No matching accounts found for the specified usernames', 'ERROR');
+        logMessage(`  Requested accounts: ${cliAccounts.join(', ')}`, 'ERROR');
+        logMessage(`  Available accounts: ${config.accounts.map(a => a.username).join(', ')}`, 'ERROR');
+        process.exit(1);
+      }
+      
+      // Check for accounts that were requested but not found
+      const foundUsernames = new Set(accountsToProcess.map(a => a.username.toLowerCase()));
+      const notFound = cliAccounts.filter(acc => !foundUsernames.has(acc.toLowerCase()));
+      if (notFound.length > 0) {
+        logMessage(`⚠ Warning: Some requested accounts were not found: ${notFound.join(', ')}`, 'WARNING');
+        logMessage(`  Will process only the ${accountsToProcess.length} matching account(s)`, 'WARNING');
+      }
+    }
+
+    logMessage(`✓ Configuration loaded`);
+    logMessage(`  - Total accounts in config: ${config.accounts.length}`);
+    logMessage(`  - Accounts to process: ${accountsToProcess.length}`);
+    if (cliAccounts) {
+      logMessage(`  - Filtered accounts: ${accountsToProcess.map(a => a.username).join(', ')}`);
+    }
+    logMessage(`  - Gmail: ${config.gmail.email}`);
+    logMessage(`  - Email subject: ${config.gmail.subject}`);
+    if (config.task.filterDate) {
+      logMessage(`  - Filter date: ${config.task.filterDate}`);
+    }
+    if (config.task.orderCodesFile) {
+      logMessage(`  - Order codes file: ${config.task.orderCodesFile}`);
+    }
+    logMessage('');
+
+    // Step 2: Initialize browser using BrowserPool (SINGLE instance for all accounts)
+    logMessage('Step 2: Initializing browser (using BrowserPool/initBrowser)...');
+    logMessage('  → This browser instance will be reused for ALL accounts');
+    const browserResult: InitBrowserResult = await initBrowser(config.task.url, 'default');
+
+    if (!browserResult.browser || !browserResult.page) {
+      logMessage(`ERROR: Failed to initialize browser: ${browserResult.error ?? 'Unknown error'}`, 'ERROR');
+      process.exit(1);
+    }
+
+    browser = browserResult.browser;
+    page = browserResult.page;
+    const profile = browserResult.profile;
+
+    // Mark browser as protected to prevent age check timer from closing it during process
+    if (profile) {
+      profile.protected = true;
+      logMessage('Browser marked as protected (will not be closed by age check timer during process)');
+    }
+
+    logMessage('✓ Browser initialized using BrowserPool');
+    logMessage('  → Single browser instance ready for all accounts');
+    logMessage('');
+
+    // Clean up browser tabs before starting the process
+    logMessage('Cleaning up browser tabs before starting process...');
+    try {
+      await cleanupBrowserTabs(browser, page);
+      logMessage('✓ Browser tabs cleaned up');
+    } catch (cleanupError: any) {
+      logMessage(`Warning: Error cleaning up tabs: ${cleanupError.message}`, 'WARNING');
+    }
+    logMessage('');
+
+    // Step 3: Check initial login status and logout if needed
+    logMessage('Step 3: Checking initial login status...');
+    const alreadyLoggedIn = await isLoggedIn(page, config);
+    
+    if (alreadyLoggedIn) {
+      logMessage('✓ User is already logged in, performing logout to start fresh...');
+      await performLogout(page, config, browser);
+      logMessage('✓ Logout completed, ready to start process');
+      logMessage('');
+    } else {
+      logMessage('✓ User is not logged in, ready to start process');
+      logMessage('');
+    }
+
+    // Step 4: Process each account in the SAME browser instance
+    logMessage('Step 4: Processing accounts (using same browser instance)...');
+    logMessage('');
+
+    // Track accounts with issues for summary
+    const accountsWithLoginIssues: string[] = [];
+    const accountsWithNoOrders: string[] = [];
+    
+    // Initialize order code tracking at the start (shared across all accounts)
+    const allOrderCodes = getOrderCodesFromConfig(config);
+    if (allOrderCodes.length > 0) {
+      const normalizedCodes = allOrderCodes.map(code => code.trim().toUpperCase());
+      (global as any).orderCodeTracking = {
+        valid: normalizedCodes,
+        processed: [],  // Shared across all accounts
+        notFound: []    // Shared across all accounts
+      };
+      logMessage('');
+      logMessage('=== INITIAL ORDER CODE LIST (SHARED ACROSS ALL ACCOUNTS) ===');
+      logMessage(`Total codes to process: ${normalizedCodes.length}`);
+      logMessage(`Codes: ${normalizedCodes.join(', ')}`);
+      logMessage('Note: Codes processed in one account will be skipped in subsequent accounts');
+      logMessage('');
+    }
+
+    for (let i = 0; i < accountsToProcess.length; i++) {
+      const account = accountsToProcess[i];
+      logMessage('');
+      logMessage(`=== Processing account ${i + 1}/${accountsToProcess.length}: ${account.username} ===`);
+      logMessage('');
+
+      try {
+        // Ensure we're on sign_in page before login
+        const currentUrl = page.url();
+        const signInUrl = 'https://www.ezcater.com/caterer_portal/sign_in';
+        
+        if (!currentUrl.includes('/sign_in')) {
+          logMessage(`Current page is not sign_in (${currentUrl}), navigating to sign_in...`);
+          await page.goto(signInUrl, { waitUntil: 'networkidle2' });
+          await waitRandomTime(2000, 3000);
+        }
+
+        // Perform login
+        logMessage(`Attempting login with account: ${account.username}...`);
+        const loginResult = await performLogin(page, browser, account, config);
+        
+        if (!loginResult.success) {
+          logMessage(`✗ LOGIN FAILED for account ${account.username}: ${loginResult.error}`, 'WARNING');
+          logMessage(`  → Skipping account ${account.username} and continuing with next account`, 'WARNING');
+          accountsWithLoginIssues.push(account.username);
+          logMessage('');
+          continue; // Try next account
+        }
+        
+        logMessage(`✓ Login successful with account: ${account.username}`);
+        await waitRandomTime(2000, 3000);
+
+        // Navigate to task URL if needed
+        try {
+          const currentUrlAfterLogin = page.url();
+          const taskUrlObj = new URL(config.task.url);
+          if (!currentUrlAfterLogin.includes(taskUrlObj.hostname)) {
+            logMessage('Navigating to task URL after login...');
+            await page.goto(config.task.url, { waitUntil: 'networkidle2' });
+            await waitRandomTime(2000, 3000);
+          }
+        } catch (urlError) {
+          logMessage('Navigating to task URL after login...');
+          await page.goto(config.task.url, { waitUntil: 'networkidle2' });
+          await waitRandomTime(2000, 3000);
+        }
+
+        // Navigate to "Completed" section
+        logMessage('Navigating to "Completed" section...');
+        await waitRandomTime(1000, 2000);
+        
+        const completedSelectors = [
+          'a[href="/completed"]',
+          'a[data-sidebar="menu-sub-button"][href="/completed"]',
+          'a:has-text("Completed")',
+          'a[href="/completed"] span:has-text("Completed")',
+          'a[data-sidebar="menu-sub-button"]:has-text("Completed")'
+        ];
+        
+        let completedLink: puppeteer.ElementHandle | null = null;
+        
+        for (const selector of completedSelectors) {
+          try {
+            const elements = await page.$$(selector);
+            if (elements.length > 0) {
+              for (const element of elements) {
+                const text = await page.evaluate(el => el.textContent || '', element);
+                if (text.toLowerCase().includes('completed')) {
+                  completedLink = element;
+                  logMessage(`Found "Completed" link using selector: ${selector}`);
+                  break;
+                }
+              }
+              if (completedLink) break;
+            }
+          } catch (error) {
+            continue;
+          }
+        }
+        
+        if (completedLink) {
+          await page.evaluate((el) => {
+            el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          }, completedLink);
+          await waitRandomTime(500, 1000);
+          await completedLink.click();
+          logMessage('Clicked on "Completed" menu item');
+          await waitRandomTime(2000, 3000);
+          
+          try {
+            await page.waitForNavigation({ waitUntil: 'networkidle0', timeout: 5000 }).catch(() => {});
+          } catch (navError) {
+            // Navigation timeout is okay
+          }
+          
+          logMessage('Navigation to "Completed" section completed');
+          await waitRandomTime(2000, 3000);
+
+          // Wait for the order list to load completely
+          logMessage('Waiting for order list to load...');
+          try {
+            // Wait for tbody with order rows to appear
+            await page.waitForSelector('tbody tr[data-test="orderRow"]', { timeout: 10000 });
+            logMessage('Order list loaded - found order rows');
+            
+            // Additional wait to ensure all rows are rendered
+            await waitRandomTime(2000, 3000);
+            
+            // Verify rows are loaded by checking count
+            const rowCount = await page.$$eval('tbody tr[data-test="orderRow"]', rows => rows.length);
+            logMessage(`Order list loaded with ${rowCount} rows`);
+          } catch (waitError: any) {
+            logMessage(`Warning: Could not verify order list load: ${waitError.message}`, 'WARNING');
+            // Still wait a bit before proceeding
+            await waitRandomTime(2000, 3000);
+          }
+
+          // Get order codes from config (file or list)
+          const orderCodesToFilter = getOrderCodesFromConfig(config);
+          if (orderCodesToFilter.length > 0) {
+            // Normalize codes
+            const normalizedCodes = orderCodesToFilter.map(code => code.trim().toUpperCase());
+            
+            // Get already processed codes from global tracking (shared across all accounts)
+            const tracking = (global as any).orderCodeTracking;
+            const alreadyProcessed = tracking ? new Set(tracking.processed || []) : new Set<string>();
+            
+            // Filter out already processed codes for this account
+            const codesToProcess = normalizedCodes.filter(code => !alreadyProcessed.has(code));
+            
+            logMessage('');
+            logMessage(`=== PROCESSING ORDER CODES FOR ACCOUNT: ${account.username} ===`);
+            logMessage(`Total codes in list: ${normalizedCodes.length}`);
+            logMessage(`Already processed (from previous accounts): ${normalizedCodes.length - codesToProcess.length}`);
+            logMessage(`Codes to process for this account: ${codesToProcess.length}`);
+            
+            if (codesToProcess.length === 0) {
+              logMessage(`All codes have already been processed in previous accounts, skipping this account`);
+              logMessage('');
+            } else {
+              logMessage(`Codes to process: ${codesToProcess.join(', ')}`);
+              logMessage('');
+              
+              // Use search-based approach to find and click orders
+              logMessage(`Starting search-based order processing for ${codesToProcess.length} codes`);
+              const searchResult = await searchAndClickOrderCodes(page, codesToProcess, config, account.username);
+              
+              // Update global tracking (shared across all accounts)
+              if (typeof (global as any).orderCodeTracking !== 'undefined') {
+                const globalTracking = (global as any).orderCodeTracking;
+                
+                // First, add processed codes
+                globalTracking.processed = [...new Set([...globalTracking.processed, ...searchResult.processed])];
+                
+                // Remove any codes from notFound that are now in processed
+                const processedSet = new Set(globalTracking.processed);
+                globalTracking.notFound = (globalTracking.notFound || []).filter((code: string) => !processedSet.has(code));
+                
+                // Then, add new notFound codes (only if not already processed)
+                for (const notFoundCode of searchResult.notFound) {
+                  if (!processedSet.has(notFoundCode) && !globalTracking.notFound.includes(notFoundCode)) {
+                    globalTracking.notFound.push(notFoundCode);
+                  }
+                }
+              }
+              
+              logMessage(`Search processing complete: ${searchResult.clicked} clicked, ${searchResult.notFound.length} not found`);
+              
+              // Check if account has no orders: if NO codes were found (all codes not found)
+              // A account is considered to have no orders only if NONE of the codes were found
+              if (searchResult.clicked === 0 && searchResult.notFound.length === codesToProcess.length) {
+                logMessage(`⚠ Account ${account.username} has no orders: None of the ${codesToProcess.length} codes were found in this account`, 'WARNING');
+                accountsWithNoOrders.push(account.username);
+              } else if (searchResult.notFound.length > 0) {
+                logMessage(`Codes not found for account ${account.username}: ${searchResult.notFound.join(', ')}`, 'WARNING');
+                logMessage(`  → Account ${account.username} found ${searchResult.clicked} order(s) out of ${codesToProcess.length} codes`);
+              } else {
+                logMessage(`✓ Account ${account.username} found all ${searchResult.clicked} order(s)`);
+              }
+            }
+          } else {
+            logMessage(`⚠ No order codes to process for account ${account.username}`, 'WARNING');
+            logMessage(`  → Account ${account.username} was opened successfully but no order codes were found in config/file`, 'WARNING');
+            logMessage(`  → This may be normal if no order codes are configured for this account`, 'WARNING');
+            accountsWithNoOrders.push(account.username);
+          }
+        } else {
+          logMessage('Warning: "Completed" menu item not found', 'WARNING');
+        }
+        
+        // Perform logout after processing each account (but keep browser open)
+        logMessage(`All orders processed for account: ${account.username}, performing logout...`);
+        try {
+          await performLogout(page, config, browser);
+          logMessage(`✓ Logout completed for account: ${account.username}`);
+        } catch (logoutError: any) {
+          logMessage(`Error during logout for account ${account.username}: ${logoutError.message}`, 'WARNING');
+          // Try to navigate to sign_in page directly
+          try {
+            await page.goto('https://www.ezcater.com/caterer_portal/sign_in', { waitUntil: 'networkidle2' });
+          } catch (navError) {
+            // Ignore navigation errors
+          }
+        }
+        logMessage('');
+        
+      } catch (accountError: any) {
+        logMessage(`Error processing account ${account.username}: ${accountError.message}`, 'WARNING');
+        // Try to logout anyway
+        try {
+          await performLogout(page, config, browser);
+        } catch (logoutError) {
+          // Ignore logout errors
+        }
+        continue; // Try next account
+      }
+    }
+    
+    // Step 5: Display statistics after processing all accounts
+    logMessage('');
+    logMessage('Step 5: Displaying statistics...');
+    const allResults = (global as any).orderResults || [];
+    if (allResults.length > 0) {
+      displayStatistics(allResults);
+    } else {
+      logMessage('No orders were processed');
+    }
+
+    logMessage('');
+    logMessage('=== ACCOUNT PROCESSING SUMMARY ===');
+    if (accountsWithLoginIssues.length > 0) {
+      logMessage(`⚠ Accounts with login problems (${accountsWithLoginIssues.length}):`, 'WARNING');
+      for (const account of accountsWithLoginIssues) {
+        logMessage(`  - ${account}`, 'WARNING');
+      }
+      logMessage('');
+    } else {
+      logMessage('✓ All accounts logged in successfully');
+      logMessage('');
+    }
+    
+    if (accountsWithNoOrders.length > 0) {
+      logMessage(`⚠ Accounts with no orders found (${accountsWithNoOrders.length}):`, 'WARNING');
+      for (const account of accountsWithNoOrders) {
+        logMessage(`  - ${account}`, 'WARNING');
+      }
+      logMessage('');
+    }
+    
+    // Display order code tracking summary
+    logMessage('');
+    logMessage('=== ORDER CODE TRACKING SUMMARY ===');
+    if (typeof (global as any).orderCodeTracking !== 'undefined') {
+      const tracking = (global as any).orderCodeTracking;
+      
+      // Clean up notFound: remove any codes that are in processed
+      const processedSet = new Set(tracking.processed || []);
+      tracking.notFound = (tracking.notFound || []).filter((code: string) => !processedSet.has(code));
+      
+      logMessage(`Total valid codes: ${tracking.valid.length}`);
+      logMessage(`Codes processed: ${tracking.processed.length}`);
+      logMessage(`Codes not found: ${tracking.notFound.length}`);
+      logMessage('');
+      
+      if (tracking.valid.length > 0) {
+        logMessage(`Valid codes: ${tracking.valid.join(', ')}`);
+        logMessage('');
+      }
+      
+      if (tracking.processed.length > 0) {
+        logMessage(`Processed codes: ${tracking.processed.join(', ')}`);
+        logMessage('');
+      }
+      
+      if (tracking.notFound.length > 0) {
+        logMessage(`⚠ Codes not found during execution (${tracking.notFound.length}):`, 'WARNING');
+        logMessage(`  ${tracking.notFound.join(', ')}`, 'WARNING');
+        logMessage('');
+      } else {
+        logMessage('✓ All codes were found and processed');
+        logMessage('');
+      }
+    } else {
+      logMessage('No order code tracking data available');
+      logMessage('');
+    }
+    
+    logMessage('=== INTEGRATED TEST RESULT: SUCCESS ===');
+    logMessage('✓ Full process completed successfully');
+    logMessage('  → All accounts processed in single browser instance');
+    logMessage('');
+
+    // Unmark browser as protected now that process is complete
+    if (profile) {
+      profile.protected = false;
+      logMessage('Browser protection removed (age check timer can now close it if needed)');
+    }
+
+    // Keep browser open for manual inspection
+    logMessage('Browser will remain open for 30 seconds for manual inspection...');
+    logMessage('You can close it manually or wait for auto-close');
+    
+    await waitRandomTime(30000, 30000);
+    
+  } catch (error: any) {
+    logMessage(`INTEGRATED test failed with error: ${error.message}`, 'ERROR');
+    logMessage(error.stack, 'ERROR');
+  } finally {
+    // Unmark browser as protected in case of error
+    if (profile) {
+      profile.protected = false;
+      logMessage('Browser protection removed (due to error or completion)');
+    }
+    
+    // Close browser at the end
+    if (browser) {
+      logMessage('Closing browser...');
+      await browser.close();
+    }
+    
+    logMessage('');
+    logMessage('=== INTEGRATED Test Completed ===');
+  }
+}
+
+// Main entry point
+async function main(): Promise<void> {
+  // Check if running in setup mode
+  if (isSetupMode()) {
+    await setupMode();
+  } else {
+    await testIntegrated();
+  }
+}
+
+// Run the test
+void main().catch(error => {
+  logMessage(`Unhandled error: ${error.message}`, 'ERROR');
+  process.exit(1);
+});

@@ -1,0 +1,37 @@
+{
+  "name": "ezcater_web_establishment_bot",
+  "version": "1.0.0",
+  "description": "Web establishment bot for automating establishment-related tasks using a bot",
+  "type": "module",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/main.js",
+    "dev": "tsx src/main.ts",
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "test:login": "tsx src/test-login.ts",
+    "test:integrated": "tsx src/test-integrated.ts",
+    "test:integrated:setup": "tsx src/test-integrated.ts --setup",
+    "test:full": "tsx src/test-full-process.ts"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@types/body-parser": "^1.19.6",
+    "@types/express": "^5.0.5",
+    "@types/node": "^24.10.1",
+    "ts-node": "^10.9.2",
+    "tsx": "^4.7.0",
+    "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "@types/js-yaml": "^4.0.9",
+    "body-parser": "^2.2.0",
+    "express": "^5.1.0",
+    "grammy": "^1.38.3",
+    "js-yaml": "^4.1.1",
+    "puppeteer": "^24.30.0",
+    "puppeteer-core": "^24.30.0"
+  }
+}

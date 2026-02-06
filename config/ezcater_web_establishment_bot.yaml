@@ -1,0 +1,134 @@
+# EZCater Web Establishment Bot Configuration
+
+browser:
+  # Chrome executable path
+  # The system will automatically detect Chrome if this path doesn't exist
+  # Auto-detection works on Windows, Linux, and macOS
+  # Windows examples:
+  #   - "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
+  #   - "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe"
+  # Linux examples:
+  #   - "/usr/bin/google-chrome"
+  #   - "/usr/bin/google-chrome-stable"
+  #   - "/usr/bin/chromium"
+  # macOS examples:
+  #   - "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+  # Leave empty or set to a non-existent path to use auto-detection
+  executablePath: ""  # Auto-detection enabled - will find Chrome automatically
+  # User data directory for chrome profile
+  userDataPath: "./browsers/{__context__}/chrome_profile_{__instance__}"
+  # Timer configuration for browser management
+  checkBrowserInterval: 80 # Seconds between browser age checks
+  browserAge: 30 # Maximum browser age in seconds
+  # Browser pool size
+  poolSize: 3
+  # Browser launch arguments
+  args:
+    - "--restore-last-session"
+    - "--disable-blink-features=AutomationControlled"
+    - "--window-size=1366,768"
+    - "--start-maximized"
+    - "--disable-session-crashed-bubble" # Prevents the "Chrome didn't shut down correctly" message
+    - "--disable-infobars" # Prevents infobars like "Chrome is being controlled"
+    - "--no-default-browser-check" # Prevents checking if Chrome is the default browser
+
+# Page viewport configuration
+viewport:
+  width: 1366
+  height: 550
+
+# Task configuration
+task:
+  # URL to check
+  url: "https://ezmanage.ezcater.com"
+  # Interval in seconds between checks
+  checkInterval: 60
+  # Selectors for elements to interact with
+  clickSelectors:
+    - "button.process-item"
+    - "a.action-link"
+  # Selector for list items
+  listSelector: ".list-item"
+  # Maximum number of items to process per cycle
+  maxItemsPerCycle: 10
+  # Date to filter orders (format: YYYY-MM-DD, e.g., "2025-01-27")
+  # If not specified, processes all items
+  filterDate: ""  # Leave empty to process all dates, or set to specific date like "2025-01-27"
+  # List of order codes to process (e.g., ["1JV-32A", "2AB-45B"])
+  # If provided, only these orders will be processed
+  orderCodes: []  # Leave empty to process all orders, or provide list like ["1JV-32A", "2AB-45B"]
+  # Path to log file containing order codes (alternative to orderCodes list)
+  # File format: each line should contain "Order: #XXXX-XXX" pattern
+  # Example: "2026-01-23T13:19:12.263Z | Order: #MP8-R78 | Time: 8:15 AM EST | ..."
+  # The bot will extract all unique order codes from the file (e.g., "MP8-R78", "MKU-PM3")
+  orderCodesFile: "C:\\Users\\Juan Blanco\\Downloads\\clicked_orders.log"  # Path to log file (absolute or relative to project root)
+
+paths:
+  # File to store PID
+  pidFile: "./browsers/chrome/pid.txt"
+  # Directory for storing task data/logs
+  dataPath: "./data"
+  # Directory for storing log files (optional, defaults to ./logs)
+  logsPath: "./logs"
+
+server:
+  basePath: /api/
+  port: 3001
+
+cleanup:
+  days: 10
+
+tokens:
+  - token: f47ac10b-58cc-4372-a567-0e02b2c3d479
+    role: admin
+    description: Default admin token
+  - token: 550e8400-e29b-41d4-a716-446655440000
+    role: admin
+    description: Development token
+  - token: 6ba7b810-9dad-11d1-80b4-00c04fd430c8
+    role: admin
+    description: Testing token
+
+# Login accounts configuration
+accounts:
+  - username: "carrot.orders@weknock.com"
+    password: "mrweknock2022"
+    gmailLabel: "EZ cater Carrot"
+  - username: "orders.sergios@weknock.com"
+    password: "mrweknock2022"
+    gmailLabel: "EZ cater Sergios"  # Gmail label to filter emails for this account (optional)
+  - username: "lacarretacatering@weknock.com"
+    password: "mrweknock2022"
+    gmailLabel: "Ez cater La Carreta"
+  - username: "pincho.catering@weknock.com"
+    password: "Mrweknock2022*"
+    gmailLabel: "EZ Pincho"
+  - username: "rice@weknock.com"
+    password: "mrweknock2022"
+    gmailLabel: "Ez Cater Rice"
+  - username: "rodillacatering@weknock.com"
+    password: "mrweknock2022"
+    gmailLabel: "EZ cater Rodilla"
+  - username: "valeco@weknock.com"
+    password: "Mrweknock2022*"
+    gmailLabel: "EZ Cater Vale Food Co"
+  - username: "bolaybrickell@weknock.com"
+    password: "Mrweknock2022*"
+    gmailLabel: "EZ cater Bolay"
+  - username: "freshkitchensf@weknock.com"
+    password: "Mrweknock2022*"
+    gmailLabel: "EZ cater Fk Midtown"   # Gmail label for this account (optional)
+
+# Gmail verification code configuration
+gmail:
+  email: "verification@example.com"  # Gmail account that receives verification codes
+  subject: "MFA code for ezCater"  # Subject to search for in emails
+  codePattern: "\\b\\d{6}\\b"  # Regex pattern to extract code (default: 6 digits)
+  loginSelector: "#contact_username"  # CSS selector for username input
+  passwordSelector: "#password"  # CSS selector for password input
+  codeInputSelector: "#code"  # CSS selector for verification code input
+  loginButtonSelector: "button[type='submit'][data-action-button-primary='true'], button[type='submit']"  # CSS selector for login button
+  continueButtonSelector: "button[type='submit'][data-action-button-primary='true']"  # CSS selector for continue button after code verification
+  loggedInIndicator: ".user-menu"  # CSS selector that indicates user is logged in
+  codeWaitTimeout: 60000  # Timeout in milliseconds to wait for verification code email
+  maxCodeRetries: 3  # Maximum number of retries to get verification code

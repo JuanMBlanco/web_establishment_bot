@@ -1,0 +1,38 @@
+# Dependencies
+node_modules/
+package-lock.json
+
+# Build output
+dist/
+build/
+
+# Browser profiles
+browsers/
+
+# Data and logs
+data/
+*.log
+
+# Environment files
+config/.env.secrets
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# PM2
+.pm2/
+pm2.log
+
+# Temporary files
+*.tmp
+*.temp
