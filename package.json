@@ -7,12 +7,12 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/main.js",
-    "dev": "tsx src/main.ts",
+    "dev": "npx tsx src/main.ts",
     "test": "echo \"Error: no test specified\" && exit 1",
-    "test:login": "tsx src/test-login.ts",
-    "test:integrated": "tsx src/test-integrated.ts",
-    "test:integrated:setup": "tsx src/test-integrated.ts --setup",
-    "test:full": "tsx src/test-full-process.ts"
+    "test:login": "npx tsx src/test-login.ts",
+    "test:integrated": "npx tsx src/test-integrated.ts",
+    "test:integrated:setup": "npx tsx src/test-integrated.ts --setup",
+    "test:full": "npx tsx src/test-full-process.ts"
   },
   "keywords": [],
   "author": "",
