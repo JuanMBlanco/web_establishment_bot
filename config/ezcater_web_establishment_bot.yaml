@@ -127,7 +127,9 @@ accounts:
 # Gmail verification code configuration
 gmail:
   email: "verification@example.com"  # Gmail account that receives verification codes
-  subject: "MFA code for ezCater"  # Subject to search for in emails
+  subject: "MFA code for ezCater"  # Primary subject to search for in emails
+  alternativeSubjects:  # Additional email subjects to search for (searched dynamically)
+    - "Please verify your ezCater account email"
   codePattern: "\\b\\d{6}\\b"  # Regex pattern to extract code (default: 6 digits)
   loginSelector: "#contact_username"  # CSS selector for username input
   passwordSelector: "#password"  # CSS selector for password input

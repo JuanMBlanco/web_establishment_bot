@@ -54,6 +54,7 @@ export interface AccountStats {
 export interface GmailConfig {
   email: string;
   subject: string;
+  alternativeSubjects?: string[];  // Additional email subjects to search for (e.g., ["Please verify your ezCater account email"])
   codePattern?: string;
   loginSelector?: string;
   passwordSelector?: string;
@@ -3612,38 +3613,48 @@ export async function getVerificationCodeFromGmailAPI(
     }
 
     // Build multiple search strategies (from most specific to least specific)
+    // Collect all subjects to search (main + alternatives)
+    const allSubjects: string[] = [gmailConfig.subject];
+    if (gmailConfig.alternativeSubjects && gmailConfig.alternativeSubjects.length > 0) {
+      allSubjects.push(...gmailConfig.alternativeSubjects);
+      logMessage(`Using ${allSubjects.length} email subjects for search (main + ${gmailConfig.alternativeSubjects.length} alternative(s))`);
+    }
+    
     const searchStrategies: string[] = [];
     
-    // Strategy 1: Full query with label and from:support
-    if (labelId) {
-      searchStrategies.push(`subject:"${gmailConfig.subject}" label:${labelId} from:support`);
-    }
-    
-    // Strategy 2: With label, without from:support
-    if (labelId) {
-      searchStrategies.push(`subject:"${gmailConfig.subject}" label:${labelId}`);
-    }
-    
-    // Strategy 3: Without label, with from:support
-    searchStrategies.push(`subject:"${gmailConfig.subject}" from:support`);
-    
-    // Strategy 4: Just subject
-    searchStrategies.push(`subject:"${gmailConfig.subject}"`);
-    
-    // Strategy 5: Subject without quotes
-    searchStrategies.push(`subject:${gmailConfig.subject}`);
-    
-    // Strategy 6: Keywords from subject
-    const subjectKeywords = gmailConfig.subject.toLowerCase().split(' ');
-    if (subjectKeywords.length > 0) {
-      searchStrategies.push(`${subjectKeywords[0]} ${subjectKeywords[1] || ''} verification code`.trim());
+    // Generate search strategies for each subject dynamically
+    for (const currentSubject of allSubjects) {
+      // Strategy 1: Full query with label and from:support
+      if (labelId) {
+        searchStrategies.push(`subject:"${currentSubject}" label:${labelId} from:support`);
+      }
+      
+      // Strategy 2: With label, without from:support
+      if (labelId) {
+        searchStrategies.push(`subject:"${currentSubject}" label:${labelId}`);
+      }
+      
+      // Strategy 3: Without label, with from:support
+      searchStrategies.push(`subject:"${currentSubject}" from:support`);
+      
+      // Strategy 4: Just subject
+      searchStrategies.push(`subject:"${currentSubject}"`);
+      
+      // Strategy 5: Subject without quotes
+      searchStrategies.push(`subject:${currentSubject}`);
+      
+      // Strategy 6: Keywords from subject
+      const subjectKeywords = currentSubject.toLowerCase().split(' ');
+      if (subjectKeywords.length > 0) {
+        searchStrategies.push(`${subjectKeywords[0]} ${subjectKeywords[1] || ''} verification code`.trim());
+      }
     }
 
-    logMessage(`Trying ${searchStrategies.length} search strategies...`);
+    logMessage(`Generated ${searchStrategies.length} search strategies across ${allSubjects.length} subject(s)...`);
 
-    // Try each search strategy
-    let response: any = null;
-    let successfulQuery = '';
+    // Collect all message IDs from all search strategies (to find the most recent across all subjects)
+    const allMessageIds = new Set<string>();
+    const successfulQueries: string[] = [];
     
     for (const searchQuery of searchStrategies) {
       logMessage(`Trying search query: ${searchQuery}`);
@@ -3656,10 +3667,15 @@ export async function getVerificationCodeFromGmailAPI(
         });
         
         if (testResponse.data.messages && testResponse.data.messages.length > 0) {
-          response = testResponse;
-          successfulQuery = searchQuery;
+          successfulQueries.push(searchQuery);
           logMessage(`✓ Found ${testResponse.data.messages.length} email(s) with query: ${searchQuery}`);
-          break;
+          
+          // Collect all message IDs, avoiding duplicates
+          for (const msg of testResponse.data.messages) {
+            if (msg.id) {
+              allMessageIds.add(msg.id);
+            }
+          }
         } else {
           logMessage(`  No results with this query`);
         }
@@ -3669,8 +3685,42 @@ export async function getVerificationCodeFromGmailAPI(
       }
     }
 
+    // Get metadata for all unique messages in parallel to sort by date
+    logMessage(`Retrieving metadata for ${allMessageIds.size} unique email(s) to find the most recent...`);
+    const messageMetadataPromises = Array.from(allMessageIds).map(async (msgId) => {
+      try {
+        const msgMeta = await gmail.users.messages.get({
+          userId: gmailUserEmail,
+          id: msgId,
+          format: 'metadata',
+          metadataHeaders: []
+        });
+        return {
+          id: msgId,
+          internalDate: parseInt(msgMeta.data.internalDate || '0')
+        };
+      } catch (e: any) {
+        logMessage(`Error getting metadata for message ${msgId}: ${e.message}`, 'WARNING');
+        return {
+          id: msgId,
+          internalDate: 0
+        };
+      }
+    });
+
+    const messageMetadata = await Promise.all(messageMetadataPromises);
+    
+    // Sort by internalDate (most recent first)
+    const allMessages = messageMetadata
+      .sort((a, b) => b.internalDate - a.internalDate);
+
+    logMessage(`Found ${allMessages.length} unique email(s) across all search strategies`);
+    if (successfulQueries.length > 0) {
+      logMessage(`Successful queries: ${successfulQueries.length}`);
+    }
+
     // If still no results, try to list recent emails for debugging
-    if (!response || !response.data.messages || response.data.messages.length === 0) {
+    if (allMessages.length === 0) {
       logMessage(`No emails found with any search strategy`, 'WARNING');
       logMessage('Attempting to list recent emails for debugging...', 'WARNING');
       
@@ -3718,20 +3768,20 @@ export async function getVerificationCodeFromGmailAPI(
       logMessage('  - The label filter is too restrictive', 'WARNING');
       logMessage('  - The email is in a different label or folder', 'WARNING');
       logMessage('  - The subject format has changed', 'WARNING');
-      logMessage(`  - Expected subject: "${gmailConfig.subject}"`, 'WARNING');
+      logMessage(`  - Expected subjects: "${gmailConfig.subject}"${gmailConfig.alternativeSubjects && gmailConfig.alternativeSubjects.length > 0 ? `, ${gmailConfig.alternativeSubjects.join('", "')}` : ''}`, 'WARNING');
       return null;
     }
 
-    logMessage(`Found ${response.data.messages.length} email(s) with query: ${successfulQuery}`);
-    logMessage('Checking emails for verification code...');
+      logMessage(`Processing ${allMessages.length} email(s) sorted by date (most recent first)...`);
+      logMessage('Checking emails for verification code...');
 
-    // Check emails from most recent to oldest
-    for (const message of response.data.messages) {
+    // Check emails from most recent to oldest (already sorted)
+    for (const messageInfo of allMessages) {
       try {
         // Get full message
         const messageResponse = await gmail.users.messages.get({
           userId: gmailUserEmail,
-          id: message.id!,
+          id: messageInfo.id,
           format: 'full'
         });
 
@@ -3747,23 +3797,23 @@ export async function getVerificationCodeFromGmailAPI(
             for (const part of messageData.payload.parts) {
               if (part.mimeType === 'text/plain' && part.body?.data) {
                 emailBody = decodeEmailBody(part.body);
-                logMessage(`Extracted email body from text/plain part (email ${message.id})`);
+                logMessage(`Extracted email body from text/plain part (email ${messageInfo.id})`);
                 break;
               } else if (part.mimeType === 'text/html' && part.body?.data && !emailBody) {
                 // Use HTML as fallback
                 emailBody = decodeEmailBody(part.body);
-                logMessage(`Extracted email body from text/html part (email ${message.id})`);
+                logMessage(`Extracted email body from text/html part (email ${messageInfo.id})`);
               }
             }
           } else if (messageData.payload.body?.data) {
             // Single part message
             emailBody = decodeEmailBody(messageData.payload.body);
-            logMessage(`Extracted email body from single part message (email ${message.id})`);
+            logMessage(`Extracted email body from single part message (email ${messageInfo.id})`);
           }
         }
 
         if (!emailBody) {
-          logMessage(`Could not extract body from email ${message.id}`, 'WARNING');
+          logMessage(`Could not extract body from email ${messageInfo.id}`, 'WARNING');
           continue;
         }
 
@@ -3775,15 +3825,15 @@ export async function getVerificationCodeFromGmailAPI(
         const code = extractVerificationCode(emailBody, gmailConfig.codePattern);
         
         if (code) {
-          logMessage(`✓ Verification code extracted from email ${message.id}: ${code}`);
+          logMessage(`✓ Verification code extracted from email ${messageInfo.id}: ${code}`);
           return code;
         } else {
-          logMessage(`No verification code found in email ${message.id}`, 'WARNING');
+          logMessage(`No verification code found in email ${messageInfo.id}`, 'WARNING');
           logMessage(`  Email body length: ${emailBody.length} characters`);
           logMessage(`  Pattern used: ${gmailConfig.codePattern || '\\b\\d{4,8}\\b'}`);
         }
       } catch (error: any) {
-        logMessage(`Error processing email ${message.id}: ${error.message}`, 'WARNING');
+        logMessage(`Error processing email ${messageInfo.id}: ${error.message}`, 'WARNING');
         continue;
       }
     }
