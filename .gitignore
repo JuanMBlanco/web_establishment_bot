@@ -12,11 +12,24 @@ browsers/
 # Data and logs
 data/
 *.log
+logs/
+logs/**
+
+# Reports
+reports/
+reports/**
 
 # Environment files
 config/.env.secrets
 .env
 .env.local
+
+# Google Drive credentials
+credentials/
+*.json
+!package.json
+!tsconfig.json
+!tsconfig.node.json
 
 # IDE
 .vscode/

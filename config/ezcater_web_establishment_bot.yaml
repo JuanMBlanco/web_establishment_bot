@@ -61,6 +61,11 @@ task:
   # File format: each line should contain "Order: #XXXX-XXX" pattern
   # Example: "2026-01-23T13:19:12.263Z | Order: #MP8-R78 | Time: 8:15 AM EST | ..."
   # The bot will extract all unique order codes from the file (e.g., "MP8-R78", "MKU-PM3")
+  # File naming: The bot supports both formats:
+  #   - Old format: clicked_orders.log (will search for most recent dated file)
+  #   - New format: clicked_orders_YYYY-MM-DD.log (e.g., clicked_orders_2026-02-16.log)
+  # If filterDate is set, the bot will try to find the file matching that date first
+  # If no date match is found, it will use the most recent file in the directory
   orderCodesFile: "C:\\Users\\Juan Blanco\\Downloads\\clicked_orders.log"  # Path to log file (absolute or relative to project root)
 
 paths:
@@ -132,3 +137,37 @@ gmail:
   loggedInIndicator: ".user-menu"  # CSS selector that indicates user is logged in
   codeWaitTimeout: 60000  # Timeout in milliseconds to wait for verification code email
   maxCodeRetries: 3  # Maximum number of retries to get verification code
+
+# Google Drive integration (optional)
+# See GOOGLE_DRIVE_SETUP.md for detailed setup instructions
+# Note: Only bot logs and unified reports will be uploaded
+googleDrive:
+  # Path to Service Account JSON credentials file
+  credentialsPath: "./credentials/google-drive-credentials.json"
+  # Google Drive Shared Drive ID where logs and reports will be uploaded
+  # ⚠️ IMPORTANT: Must be a Shared Drive ID, not a personal folder
+  # Get this from the Shared Drive URL: https://drive.google.com/drive/folders/SHARED_DRIVE_ID_HERE
+  folderId: ""  # Set your Shared Drive ID here
+  # Enable/disable automatic upload
+  enabled: false  # Set to true to enable Google Drive uploads
+  # Upload frequency in hours (0 = upload after each execution, 24 = daily, etc.)
+  # Set to 0 to upload after each test-integrated execution
+  uploadIntervalHours: 0
+  # Folder structure in Google Drive
+  folderStructure:
+    logs: "logs"  # Folder for bot logs
+    reports: "reports"  # Folder for unified reports
+  # Organize reports by date in Google Drive (creates subfolders by date)
+  # Structure: reports/YYYY-MM-DD/reporte_unificado_YYYY-MM-DD.md
+  organizeReportsByDate: true
+  # Gmail user email for Domain-Wide Delegation (impersonation)
+  # Required when using Service Account to access Gmail (optional for Drive only)
+  # Example: gmailUserEmail: "user@yourdomain.com"
+  gmailUserEmail: "orders@weknock.com"
+  # Gmail API is now the PRIMARY method for retrieving verification codes
+  # Puppeteer is used as fallback if Gmail API is not available or fails
+  # Gmail API will be used automatically if:
+  #   - gmailUserEmail is configured (required)
+  #   - credentialsPath is configured (required)
+  # Note: Gmail API works independently of Google Drive uploads (enabled can be false)
+  # Benefits: Faster, more reliable, supports label filtering

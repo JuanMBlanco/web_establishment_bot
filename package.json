@@ -12,7 +12,9 @@
     "test:login": "npx tsx src/test-login.ts",
     "test:integrated": "npx tsx src/test-integrated.ts",
     "test:integrated:setup": "npx tsx src/test-integrated.ts --setup",
-    "test:full": "npx tsx src/test-full-process.ts"
+    "test:integrated:today": "node run-test-integrated-today.js",
+    "test:full": "npx tsx src/test-full-process.ts",
+    "test:gmail-api": "npx tsx src/test-gmail-api.ts"
   },
   "keywords": [],
   "author": "",
@@ -29,6 +31,7 @@
     "@types/js-yaml": "^4.0.9",
     "body-parser": "^2.2.0",
     "express": "^5.1.0",
+    "googleapis": "^144.0.0",
     "grammy": "^1.38.3",
     "js-yaml": "^4.1.1",
     "puppeteer": "^24.30.0",

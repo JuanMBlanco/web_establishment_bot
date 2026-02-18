@@ -11,6 +11,8 @@ import puppeteer from 'puppeteer';
 import { launch } from 'puppeteer-core';
 import yaml from 'js-yaml';
 import { Bot } from 'grammy';
+import { google } from 'googleapis';
+import { readdirSync } from 'fs';
 
 interface ApiResponse {
   success: boolean;
@@ -101,6 +103,19 @@ export interface BotConfig {
   tokens?: Token[];
   accounts?: Account[];
   gmail?: GmailConfig;
+  googleDrive?: {
+    credentialsPath: string;
+    folderId: string;
+    enabled: boolean;
+    uploadIntervalHours?: number;
+    folderStructure?: {
+      logs: string;
+      reports: string;
+    };
+    organizeReportsByDate?: boolean;
+    gmailUserEmail?: string;  // For Domain-Wide Delegation (optional)
+    useGmailAPI?: boolean;  // Use Gmail API instead of Puppeteer for verification codes
+  };
 }
 
 let validTokens: Token[] = [];
@@ -1512,24 +1527,121 @@ function readOrderCodesFromFile(filePath: string, targetDate?: string): string[]
 }
 
 /**
- * Get order codes from configuration (file or list)
+ * Find clicked_orders log file with date pattern
+ * Supports both old format (clicked_orders.log) and new format (clicked_orders_YYYY-MM-DD.log)
  */
-export function getOrderCodesFromConfig(config: BotConfig): string[] {
+function findClickedOrdersFile(basePath: string, targetDate?: string): string | null {
+  try {
+    const dir = path.dirname(basePath);
+    const baseName = path.basename(basePath);
+    
+    // If baseName is just "clicked_orders.log", try to find file with date pattern
+    if (baseName === 'clicked_orders.log' || baseName.endsWith('clicked_orders.log')) {
+      // If targetDate is provided, try that specific date first
+      if (targetDate) {
+        const datedFileName = `clicked_orders_${targetDate}.log`;
+        const datedFilePath = path.join(dir, datedFileName);
+        if (existsSync(datedFilePath)) {
+          logMessage(`Found clicked_orders file with date: ${datedFilePath}`);
+          return datedFilePath;
+        }
+      }
+      
+      // Try to find the most recent file with date pattern
+      try {
+        const files = readdirSync(dir);
+        const clickedOrdersFiles = files.filter((file: string) => 
+          file.startsWith('clicked_orders_') && 
+          file.endsWith('.log') &&
+          /clicked_orders_\d{4}-\d{2}-\d{2}\.log$/.test(file)
+        );
+        
+        if (clickedOrdersFiles.length > 0) {
+          // Sort by date (most recent first)
+          clickedOrdersFiles.sort((a, b) => {
+            const dateA = a.match(/clicked_orders_(\d{4}-\d{2}-\d{2})\.log$/)?.[1] || '';
+            const dateB = b.match(/clicked_orders_(\d{4}-\d{2}-\d{2})\.log$/)?.[1] || '';
+            return dateB.localeCompare(dateA); // Descending order (newest first)
+          });
+          
+          // If targetDate is provided, try to find exact match first
+          if (targetDate) {
+            const exactMatch = clickedOrdersFiles.find((file: string) => 
+              file === `clicked_orders_${targetDate}.log`
+            );
+            if (exactMatch) {
+              const filePath = path.join(dir, exactMatch);
+              logMessage(`Found clicked_orders file matching target date: ${filePath}`);
+              return filePath;
+            }
+          }
+          
+          // Use the most recent file
+          const mostRecentFile = clickedOrdersFiles[0];
+          const filePath = path.join(dir, mostRecentFile);
+          logMessage(`Found most recent clicked_orders file: ${filePath}`);
+          return filePath;
+        }
+      } catch (dirError: any) {
+        logMessage(`Error reading directory ${dir}: ${dirError.message}`, 'WARNING');
+      }
+      
+      // Fallback: try the original path
+      if (existsSync(basePath)) {
+        logMessage(`Using original clicked_orders file: ${basePath}`);
+        return basePath;
+      }
+    } else {
+      // If it's already a specific file path, use it as-is
+      if (existsSync(basePath)) {
+        return basePath;
+      }
+    }
+    
+    return null;
+  } catch (error: any) {
+    logMessage(`Error finding clicked_orders file: ${error.message}`, 'WARNING');
+    return null;
+  }
+}
+
+/**
+ * Get order codes from configuration (file or list)
+ * @param config - Bot configuration
+ * @param overrideDate - Optional date override (from CLI parameter --date). Takes precedence over config.task.filterDate
+ */
+export function getOrderCodesFromConfig(config: BotConfig, overrideDate?: string): string[] {
   const orderCodes: string[] = [];
 
   // First, try to read from file if configured
   if (config.task.orderCodesFile && config.task.orderCodesFile.trim() !== '') {
-    const filePath = path.isAbsolute(config.task.orderCodesFile)
+    const baseFilePath = path.isAbsolute(config.task.orderCodesFile)
       ? config.task.orderCodesFile
       : path.join(projectRoot, config.task.orderCodesFile);
     
-    // Use filterDate if configured, otherwise read all codes
-    const targetDate = config.task.filterDate && config.task.filterDate.trim() !== ''
-      ? config.task.filterDate
-      : undefined;
+    // Use overrideDate (from CLI) if provided, otherwise use filterDate from config, otherwise undefined
+    const targetDate = overrideDate && overrideDate.trim() !== ''
+      ? overrideDate
+      : (config.task.filterDate && config.task.filterDate.trim() !== ''
+          ? config.task.filterDate
+          : undefined);
     
-    const codesFromFile = readOrderCodesFromFile(filePath, targetDate);
-    orderCodes.push(...codesFromFile);
+    // Find the actual file (supports both old and new format with date)
+    // Priority: Use targetDate to find clicked_orders_YYYY-MM-DD.log
+    const filePath = findClickedOrdersFile(baseFilePath, targetDate);
+    
+    if (filePath) {
+      logMessage(`Using order codes file: ${filePath}`);
+      const codesFromFile = readOrderCodesFromFile(filePath, targetDate);
+      orderCodes.push(...codesFromFile);
+    } else {
+      logMessage(`Order codes file not found: ${baseFilePath}`, 'WARNING');
+      if (targetDate) {
+        logMessage(`Also tried: clicked_orders_${targetDate}.log in same directory`, 'WARNING');
+      } else {
+        logMessage(`Tried to find most recent clicked_orders_YYYY-MM-DD.log file in directory`, 'WARNING');
+      }
+    }
   }
 
   // Then, add codes from list if configured
@@ -2798,6 +2910,893 @@ export function displayStatistics(results: OrderResult[]): void {
 }
 
 /**
+ * Generate unified report in markdown format
+ */
+export function generateUnifiedReport(
+  results: OrderResult[],
+  filterDate: string | undefined,
+  accountsWithNoOrders: string[],
+  accountsWithLoginIssues: string[],
+  orderCodeTracking?: { valid: string[]; processed: string[]; notFound: string[] }
+): string {
+  // Get date for report (use filterDate or current date)
+  const reportDate = filterDate || new Date().toISOString().split('T')[0];
+  const [year, month, day] = reportDate.split('-').map(Number);
+  const dayNumber = day;
+  
+  // Calculate account statistics
+  const accountStats = calculateAccountStats(results);
+  
+  // Build report content
+  let report = `# Reporte Unificado de Procesamiento de Órdenes\n`;
+  report += `## Fecha de las Órdenes: ${reportDate} (Día ${dayNumber})\n\n`;
+  report += `---\n\n`;
+  
+  // === ESTADÍSTICAS DE PROCESAMIENTO DE ÓRDENES ===
+  report += `## === ESTADÍSTICAS DE PROCESAMIENTO DE ÓRDENES ===\n\n`;
+  
+  for (const stats of accountStats) {
+    const accountResults = results.filter(r => r.account === stats.account);
+    const successOrders = accountResults.filter(r => r.status === 'success').map(r => r.orderCode);
+    const failureOrders = accountResults.filter(r => r.status === 'failure');
+    
+    report += `### Account: ${stats.account}\n`;
+    report += `- Order Codes: ${stats.orderCodes.join(', ')}\n`;
+    report += `- Success: ${stats.successCount}\n`;
+    
+    if (successOrders.length > 0) {
+      report += `  - ✓ Success Orders: ${successOrders.join(', ')}\n`;
+    }
+    
+    report += `- Failure: ${stats.failureCount}\n`;
+    
+    if (failureOrders.length > 0) {
+      report += `  - ✗ Failure Orders:\n`;
+      for (const failure of failureOrders) {
+        report += `    - ${failure.orderCode}\n`;
+        if (failure.issueDetails) {
+          const cleanIssue = failure.issueDetails
+            .replace(/\s+/g, ' ')
+            .trim()
+            .substring(0, 200);
+          report += `      - Issue: ${cleanIssue}${failure.issueDetails.length > 200 ? '...' : ''}\n`;
+        }
+      }
+    }
+    
+    report += `- Total: ${stats.totalCount}\n`;
+    report += `- Success Rate: ${stats.successRate}%\n\n`;
+    report += `---\n\n`;
+  }
+  
+  // === ESTADÍSTICAS TOTALES ===
+  const totalSuccess = results.filter(r => r.status === 'success').length;
+  const totalFailure = results.filter(r => r.status === 'failure').length;
+  const totalOrders = results.length;
+  const totalSuccessRate = totalOrders > 0 ? Math.round((totalSuccess / totalOrders) * 100 * 100) / 100 : 0;
+  
+  report += `## === ESTADÍSTICAS TOTALES ===\n\n`;
+  report += `Todas las órdenes procesadas corresponden al día ${dayNumber} de ${getMonthName(month)} de ${year} (${reportDate})\n\n`;
+  report += `- Total Orders Processed: ${totalOrders}\n`;
+  report += `- Total Success: ${totalSuccess}\n`;
+  report += `- Total Failure: ${totalFailure}\n`;
+  report += `- Overall Success Rate: ${totalSuccessRate}%\n`;
+  report += `- Fecha de las órdenes: ${reportDate} (Día ${dayNumber})\n\n`;
+  report += `---\n\n`;
+  
+  // === LISTA DETALLADA DE ÓRDENES ===
+  report += `## === LISTA DETALLADA DE ÓRDENES ===\n\n`;
+  
+  const successList = results.filter(r => r.status === 'success').map(r => r.orderCode);
+  const failureList = results.filter(r => r.status === 'failure');
+  
+  report += `### Success Orders (${successList.length} totales)\n\n`;
+  if (successList.length > 0) {
+    report += `${successList.join(', ')}\n\n`;
+  } else {
+    report += `No hay órdenes exitosas.\n\n`;
+  }
+  
+  report += `---\n\n`;
+  
+  report += `### Failure Orders (${failureList.length} totales)\n\n`;
+  if (failureList.length > 0) {
+    for (const failure of failureList) {
+      report += `- ${failure.orderCode}\n`;
+      if (failure.issueDetails) {
+        const cleanIssue = failure.issueDetails
+          .replace(/\s+/g, ' ')
+          .trim()
+          .substring(0, 200);
+        report += `  - Issue: ${cleanIssue}${failure.issueDetails.length > 200 ? '...' : ''}\n`;
+      }
+    }
+    report += `\n`;
+  } else {
+    report += `No hay órdenes fallidas.\n\n`;
+  }
+  
+  report += `---\n\n`;
+  
+  // === RESUMEN DE PROCESAMIENTO DE CUENTAS ===
+  report += `## === RESUMEN DE PROCESAMIENTO DE CUENTAS ===\n\n`;
+  
+  const successfulAccounts = accountStats.filter(s => s.totalCount > 0);
+  report += `### Cuentas Procesadas Exitosamente (${successfulAccounts.length} cuentas)\n\n`;
+  
+  if (successfulAccounts.length > 0) {
+    let accountNumber = 1;
+    for (const stats of successfulAccounts) {
+      const successRate = stats.totalCount > 0 ? Math.round((stats.successCount / stats.totalCount) * 100) : 0;
+      report += `${accountNumber}. ✓ ${stats.account} - ${stats.totalCount} orden${stats.totalCount !== 1 ? 'es' : ''} (${successRate}% éxito)\n`;
+      accountNumber++;
+    }
+    report += `\n`;
+  } else {
+    report += `No hay cuentas con órdenes procesadas.\n\n`;
+  }
+  
+  report += `### Cuentas Sin Órdenes Encontradas\n\n`;
+  if (accountsWithNoOrders.length > 0) {
+    for (const account of accountsWithNoOrders) {
+      report += `- ⚠ ${account}\n`;
+    }
+    report += `\n`;
+  } else {
+    report += `Todas las cuentas tienen órdenes procesadas.\n\n`;
+  }
+  
+  if (accountsWithLoginIssues.length > 0) {
+    report += `### Cuentas Con Problemas de Login\n\n`;
+    for (const account of accountsWithLoginIssues) {
+      report += `- ✗ ${account}\n`;
+    }
+    report += `\n`;
+  }
+  
+  report += `---\n\n`;
+  
+  // === RESUMEN DE SEGUIMIENTO DE CÓDIGOS DE ÓRDEN ===
+  if (orderCodeTracking) {
+    report += `## === RESUMEN DE SEGUIMIENTO DE CÓDIGOS DE ÓRDEN ===\n\n`;
+    report += `Todas las órdenes corresponden al día ${dayNumber} de ${getMonthName(month)} de ${year} (${reportDate})\n\n`;
+    
+    report += `### Códigos Totales\n\n`;
+    report += `- Total valid codes (día ${dayNumber}): ${orderCodeTracking.valid.length}\n`;
+    report += `- Codes processed (día ${dayNumber}): ${orderCodeTracking.processed.length}\n`;
+    report += `- Codes not found (día ${dayNumber}): ${orderCodeTracking.notFound.length}\n\n`;
+    
+    report += `### Códigos No Encontrados (${orderCodeTracking.notFound.length})\n\n`;
+    if (orderCodeTracking.notFound.length > 0) {
+      report += `${orderCodeTracking.notFound.join(', ')}\n\n`;
+    } else {
+      report += `Todos los códigos fueron encontrados y procesados exitosamente.\n\n`;
+    }
+    
+    report += `---\n\n`;
+  }
+  
+  // === ANÁLISIS DE RESULTADOS ===
+  report += `## === ANÁLISIS DE RESULTADOS ===\n\n`;
+  
+  report += `### Distribución de Éxito por Cuenta\n\n`;
+  report += `| Cuenta | Órdenes | Éxito | Fracaso | Tasa de Éxito |\n`;
+  report += `|--------|---------|-------|---------|---------------|\n`;
+  
+  for (const stats of accountStats) {
+    const successRate = stats.totalCount > 0 ? Math.round((stats.successCount / stats.totalCount) * 100) : 0;
+    report += `| ${stats.account} | ${stats.totalCount} | ${stats.successCount} | ${stats.failureCount} | ${successRate}% |\n`;
+  }
+  
+  report += `| TOTAL | ${totalOrders} | ${totalSuccess} | ${totalFailure} | ${totalSuccessRate}% |\n\n`;
+  
+  report += `### Análisis de Problemas\n\n`;
+  if (totalFailure === 0 && accountsWithLoginIssues.length === 0) {
+    report += `No se encontraron problemas en el procesamiento. Todas las órdenes fueron procesadas exitosamente.\n\n`;
+  } else {
+    if (totalFailure > 0) {
+      report += `Se encontraron ${totalFailure} orden${totalFailure !== 1 ? 'es' : ''} con problemas de entrega.\n\n`;
+    }
+    if (accountsWithLoginIssues.length > 0) {
+      report += `Se encontraron ${accountsWithLoginIssues.length} cuenta${accountsWithLoginIssues.length !== 1 ? 's' : ''} con problemas de login.\n\n`;
+    }
+  }
+  
+  report += `---\n\n`;
+  
+  return report;
+}
+
+/**
+ * Helper function to get month name in Spanish
+ */
+function getMonthName(month: number): string {
+  const months = [
+    'enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio',
+    'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'
+  ];
+  return months[month - 1] || '';
+}
+
+/**
+ * Save unified report to file as an additional independent file
+ * Each execution creates a new file with timestamp to avoid overwriting
+ * Reports are saved in a separate 'reports' folder
+ */
+export function saveUnifiedReport(
+  reportContent: string,
+  filterDate: string | undefined,
+  config: BotConfig
+): string {
+  const reportDate = filterDate || new Date().toISOString().split('T')[0];
+  // Use dedicated reports folder (separate from logs)
+  const reportsDir = 'reports';
+  
+  // Generate report filename with date only (format: reporte_unificado_YYYY-MM-DD.md)
+  const reportFileName = `reporte_unificado_${reportDate}.md`;
+  const reportPath = `${reportsDir}/${reportFileName}`;
+  
+  // Ensure reports directory exists
+  try {
+    if (!existsSync(reportsDir)) {
+      mkdirSync(reportsDir, { recursive: true });
+      logMessage(`Created reports directory: ${reportsDir}`);
+    }
+  } catch (error: any) {
+    logMessage(`Warning: Could not create reports directory: ${error.message}`, 'WARNING');
+  }
+  
+  // Write report file (as an additional independent file)
+  try {
+    writeFileSync(reportPath, reportContent, 'utf8');
+    logMessage(`✓ Unified report saved: ${reportPath}`);
+    logMessage(`  → Report file will be overwritten if run multiple times on the same date`);
+    logMessage(`  → Reports are saved in the 'reports' folder (ignored by git)`);
+    return reportPath;
+  } catch (error: any) {
+    logMessage(`Error saving unified report: ${error.message}`, 'ERROR');
+    return '';
+  }
+}
+
+// ============================================================================
+// Google Drive API Integration
+// ============================================================================
+
+// Cache for Google Drive client
+let driveClient: any = null;
+let lastDriveClientInit: number = 0;
+const DRIVE_CLIENT_CACHE_MS = 5 * 60 * 1000; // 5 minutes
+
+// Cache for Gmail client
+let gmailClient: any = null;
+let lastGmailClientInit: number = 0;
+const GMAIL_CLIENT_CACHE_MS = 5 * 60 * 1000; // 5 minutes
+
+/**
+ * Initialize Google Drive client using Service Account credentials
+ */
+async function initGoogleDriveClient(credentialsPath: string): Promise<any> {
+  try {
+    // Use cached client if available and not expired
+    const now = Date.now();
+    if (driveClient && (now - lastDriveClientInit) < DRIVE_CLIENT_CACHE_MS) {
+      return driveClient;
+    }
+
+    logMessage('Initializing Google Drive client...');
+    
+    // Read credentials file
+    const credentialsContent = readFileSync(credentialsPath, 'utf8');
+    const credentials = JSON.parse(credentialsContent);
+    
+    // Create auth client using JWT
+    // Note: Using drive scope (not drive.file) to support Shared Drives
+    const auth = new google.auth.JWT({
+      email: credentials.client_email,
+      key: credentials.private_key,
+      scopes: ['https://www.googleapis.com/auth/drive']
+    });
+    
+    await auth.authorize();
+    
+    // Create Drive client
+    driveClient = google.drive({
+      version: 'v3',
+      auth: auth
+    });
+    
+    lastDriveClientInit = now;
+    logMessage('✓ Google Drive client initialized');
+    
+    return driveClient;
+  } catch (error: any) {
+    logMessage(`Error initializing Google Drive client: ${error.message}`, 'ERROR');
+    throw error;
+  }
+}
+
+/**
+ * Find or create a folder in Google Drive
+ */
+async function findOrCreateFolder(drive: any, parentFolderId: string, folderName: string): Promise<string> {
+  try {
+    // Search for existing folder (support Shared Drives)
+    const response = await drive.files.list({
+      q: `'${parentFolderId}' in parents and name='${folderName}' and mimeType='application/vnd.google-apps.folder' and trashed=false`,
+      fields: 'files(id, name)',
+      spaces: 'drive',
+      supportsAllDrives: true,
+      includeItemsFromAllDrives: true,
+      corpora: 'allDrives'
+    });
+    
+    if (response.data.files && response.data.files.length > 0) {
+      logMessage(`✓ Found existing folder: ${folderName}`);
+      return response.data.files[0].id;
+    }
+    
+    // Create folder if it doesn't exist (support Shared Drives)
+    logMessage(`Creating folder: ${folderName}...`);
+    const createResponse = await drive.files.create({
+      requestBody: {
+        name: folderName,
+        mimeType: 'application/vnd.google-apps.folder',
+        parents: [parentFolderId]
+      },
+      fields: 'id',
+      supportsAllDrives: true
+    });
+    
+    logMessage(`✓ Created folder: ${folderName}`);
+    return createResponse.data.id!;
+  } catch (error: any) {
+    logMessage(`Error finding/creating folder ${folderName}: ${error.message}`, 'ERROR');
+    throw error;
+  }
+}
+
+/**
+ * Find a file by name in a folder
+ */
+async function findFileByName(drive: any, parentFolderId: string, fileName: string): Promise<string | null> {
+  try {
+    const response = await drive.files.list({
+      q: `'${parentFolderId}' in parents and name='${fileName}' and trashed=false`,
+      fields: 'files(id, name)',
+      spaces: 'drive',
+      supportsAllDrives: true,
+      includeItemsFromAllDrives: true,
+      corpora: 'allDrives'
+    });
+    
+    if (response.data.files && response.data.files.length > 0) {
+      return response.data.files[0].id;
+    }
+    
+    return null;
+  } catch (error: any) {
+    logMessage(`Error finding file ${fileName}: ${error.message}`, 'ERROR');
+    return null;
+  }
+}
+
+/**
+ * Upload or update a file in Google Drive
+ * If file exists, updates it; otherwise creates new one
+ */
+async function uploadOrUpdateFile(drive: any, parentFolderId: string, localFilePath: string, driveFileName: string, mimeType: string = 'text/plain'): Promise<boolean> {
+  try {
+    if (!existsSync(localFilePath)) {
+      logMessage(`File does not exist locally: ${localFilePath}`, 'WARNING');
+      return false;
+    }
+    
+    // Read file content
+    const fileContent = readFileSync(localFilePath, 'utf8');
+    
+    // Check if file exists in Drive
+    const existingFileId = await findFileByName(drive, parentFolderId, driveFileName);
+    
+    if (existingFileId) {
+      // Update existing file (support Shared Drives)
+      logMessage(`Updating existing file in Drive: ${driveFileName}...`);
+      await drive.files.update({
+        fileId: existingFileId,
+        requestBody: {
+          name: driveFileName
+        },
+        media: {
+          mimeType: mimeType,
+          body: fileContent
+        },
+        supportsAllDrives: true
+      });
+      logMessage(`✓ Updated file in Drive: ${driveFileName}`);
+    } else {
+      // Create new file (support Shared Drives)
+      logMessage(`Uploading new file to Drive: ${driveFileName}...`);
+      await drive.files.create({
+        requestBody: {
+          name: driveFileName,
+          parents: [parentFolderId]
+        },
+        media: {
+          mimeType: mimeType,
+          body: fileContent
+        },
+        fields: 'id',
+        supportsAllDrives: true
+      });
+      logMessage(`✓ Uploaded file to Drive: ${driveFileName}`);
+    }
+    
+    return true;
+  } catch (error: any) {
+    logMessage(`Error uploading/updating file ${driveFileName}: ${error.message}`, 'ERROR');
+    return false;
+  }
+}
+
+/**
+ * Upload logs and reports to Google Drive
+ * Uploads: bot logs and unified reports
+ */
+export async function uploadLogsAndReportsToGoogleDrive(config: BotConfig): Promise<void> {
+  try {
+    // Check if Google Drive is enabled
+    if (!config.googleDrive || !config.googleDrive.enabled) {
+      return; // Silently skip if not enabled
+    }
+    
+    // Validate configuration
+    if (!config.googleDrive.credentialsPath || !config.googleDrive.folderId) {
+      logMessage('Google Drive credentials or folder ID not configured', 'WARNING');
+      return;
+    }
+    
+    // Check if credentials file exists
+    const credentialsPath = path.resolve(projectRoot, config.googleDrive.credentialsPath);
+    if (!existsSync(credentialsPath)) {
+      logMessage(`Google Drive credentials file not found: ${credentialsPath}`, 'WARNING');
+      return;
+    }
+    
+    logMessage('Starting Google Drive upload...');
+    
+    // Initialize Drive client
+    const drive = await initGoogleDriveClient(credentialsPath);
+    const rootFolderId = config.googleDrive.folderId;
+    
+    const folderStructure = config.googleDrive.folderStructure || {
+      logs: 'logs',
+      reports: 'reports'
+    };
+    
+    const organizeReportsByDate = config.googleDrive.organizeReportsByDate !== false;
+    
+    // Get current date for file matching
+    const now = new Date();
+    const dateStr = now.toISOString().split('T')[0]; // YYYY-MM-DD
+    
+    // 1. Upload bot logs
+    try {
+      const logsPath = config.paths.logsPath || path.join(projectRoot, 'logs');
+      const logFileName = `bot_${dateStr}.log`;
+      const logFilePath = path.join(logsPath, logFileName);
+      
+      if (existsSync(logFilePath)) {
+        const logsFolderId = await findOrCreateFolder(drive, rootFolderId, folderStructure.logs);
+        await uploadOrUpdateFile(drive, logsFolderId, logFilePath, logFileName);
+      }
+    } catch (error: any) {
+      logMessage(`Error uploading bot logs: ${error.message}`, 'ERROR');
+    }
+    
+    // 2. Upload unified reports
+    try {
+      const reportsDir = path.join(projectRoot, 'reports');
+      if (existsSync(reportsDir)) {
+        const reportsFolderId = await findOrCreateFolder(drive, rootFolderId, folderStructure.reports);
+        
+        // Find all report files
+        const files = readdirSync(reportsDir);
+        const reportFiles = files.filter((file: string) => 
+          file.startsWith('reporte_unificado_') && file.endsWith('.md')
+        );
+        
+        for (const fileName of reportFiles) {
+          try {
+            const localFilePath = path.join(reportsDir, fileName);
+            
+            // Extract date from filename: reporte_unificado_YYYY-MM-DD.md
+            const dateMatch = fileName.match(/reporte_unificado_(\d{4}-\d{2}-\d{2})\.md/);
+            const fileDate = dateMatch ? dateMatch[1] : dateStr;
+            
+            let targetFolderId = reportsFolderId;
+            
+            // If organize by date is enabled, create/use date subfolder
+            if (organizeReportsByDate) {
+              targetFolderId = await findOrCreateFolder(drive, reportsFolderId, fileDate);
+            }
+            
+            // Always update reports (they may change)
+            await uploadOrUpdateFile(drive, targetFolderId, localFilePath, fileName, 'text/markdown');
+          } catch (error: any) {
+            logMessage(`Error uploading report file ${fileName}: ${error.message}`, 'ERROR');
+          }
+        }
+      }
+    } catch (error: any) {
+      logMessage(`Error uploading reports: ${error.message}`, 'ERROR');
+    }
+    
+    logMessage('✓ Google Drive upload completed');
+  } catch (error: any) {
+    logMessage(`Error in Google Drive upload process: ${error.message}`, 'ERROR');
+  }
+}
+
+// ============================================================================
+// Gmail API Integration (Alternative to Puppeteer)
+// ============================================================================
+
+/**
+ * Initialize Gmail client using Service Account with Domain-Wide Delegation
+ */
+async function initGmailClient(credentialsPath: string, gmailUserEmail: string): Promise<any> {
+  try {
+    // Use cached client if available and not expired
+    const now = Date.now();
+    if (gmailClient && (now - lastGmailClientInit) < GMAIL_CLIENT_CACHE_MS) {
+      return gmailClient;
+    }
+
+    logMessage('Initializing Gmail client...');
+    
+    // Read credentials file
+    const credentialsContent = readFileSync(credentialsPath, 'utf8');
+    const credentials = JSON.parse(credentialsContent);
+    
+    // Create auth client using JWT with Domain-Wide Delegation
+    // Note: Service Accounts need Domain-Wide Delegation configured in Google Workspace Admin Console
+    const auth = new google.auth.JWT({
+      email: credentials.client_email,
+      key: credentials.private_key,
+      scopes: ['https://www.googleapis.com/auth/gmail.readonly'],
+      subject: gmailUserEmail // Impersonate this user (required for Domain-Wide Delegation)
+    });
+    
+    await auth.authorize();
+    
+    // Create Gmail client
+    gmailClient = google.gmail({
+      version: 'v1',
+      auth: auth
+    });
+    
+    lastGmailClientInit = now;
+    logMessage(`✓ Gmail client initialized for user: ${gmailUserEmail}`);
+    
+    return gmailClient;
+  } catch (error: any) {
+    logMessage(`Error initializing Gmail client: ${error.message}`, 'ERROR');
+    if (error.message.includes('Precondition check failed') || error.message.includes('403') || error.message.includes('401')) {
+      logMessage('Service Account cannot access Gmail. This requires Domain-Wide Delegation setup.', 'WARNING');
+      logMessage('Configure Domain-Wide Delegation in Google Workspace Admin Console.', 'WARNING');
+    }
+    throw error;
+  }
+}
+
+/**
+ * Get Gmail label ID by name
+ */
+async function getGmailLabelId(gmail: any, userId: string, labelName: string): Promise<string | null> {
+  try {
+    const response = await gmail.users.labels.list({
+      userId: userId
+    });
+    
+    if (!response.data.labels) {
+      return null;
+    }
+    
+    // Search for label by name (case-insensitive)
+    const label = response.data.labels.find((l: any) => 
+      l.name.toLowerCase() === labelName.toLowerCase()
+    );
+    
+    if (label) {
+      logMessage(`Found Gmail label "${labelName}" with ID: ${label.id}`);
+      return label.id;
+    }
+    
+    logMessage(`Gmail label "${labelName}" not found`, 'WARNING');
+    return null;
+  } catch (error: any) {
+    logMessage(`Error getting Gmail label ID: ${error.message}`, 'ERROR');
+    return null;
+  }
+}
+
+/**
+ * Decode email body from base64url format
+ */
+function decodeEmailBody(body: any): string {
+  if (!body || !body.data) {
+    return '';
+  }
+  
+  // Gmail uses base64url encoding (not standard base64)
+  // Replace - with + and _ with /
+  const base64 = body.data.replace(/-/g, '+').replace(/_/g, '/');
+  
+  try {
+    return Buffer.from(base64, 'base64').toString('utf-8');
+  } catch (error) {
+    logMessage('Error decoding email body', 'WARNING');
+    return '';
+  }
+}
+
+/**
+ * Extract verification code from email body
+ */
+function extractVerificationCode(emailBody: string, codePattern?: string): string | null {
+  // First, try to extract code after "Your verification code is:"
+  const verificationCodePattern = /Your verification code is:\s*(\d{4,8})/i;
+  const verificationMatch = emailBody.match(verificationCodePattern);
+  
+  if (verificationMatch && verificationMatch[1]) {
+    return verificationMatch[1];
+  }
+  
+  // Fallback: Extract code using general regex pattern
+  const pattern = codePattern || '\\b\\d{4,8}\\b';
+  const regex = new RegExp(pattern);
+  const match = emailBody.match(regex);
+  
+  if (match && match[0]) {
+    return match[0];
+  }
+  
+  return null;
+}
+
+/**
+ * Get verification code from Gmail using API (alternative to Puppeteer)
+ * This function uses Gmail API to search for emails by label and subject
+ */
+export async function getVerificationCodeFromGmailAPI(
+  config: BotConfig,
+  account?: Account
+): Promise<string | null> {
+  try {
+    if (!config.gmail) {
+      logMessage('Gmail configuration not found', 'ERROR');
+      return null;
+    }
+
+    // Check if Google Drive config exists (we reuse the same credentials)
+    const credentialsPath = config.googleDrive?.credentialsPath;
+    const gmailUserEmail = config.googleDrive?.gmailUserEmail;
+    
+    if (!credentialsPath || !gmailUserEmail) {
+      logMessage('Gmail API credentials not configured. Need credentialsPath and gmailUserEmail in googleDrive config.', 'WARNING');
+      return null;
+    }
+
+    const resolvedCredentialsPath = path.resolve(projectRoot, credentialsPath);
+    if (!existsSync(resolvedCredentialsPath)) {
+      logMessage(`Gmail credentials file not found: ${resolvedCredentialsPath}`, 'WARNING');
+      return null;
+    }
+
+    logMessage('Using Gmail API to retrieve verification code...');
+
+    // Initialize Gmail client
+    const gmail = await initGmailClient(resolvedCredentialsPath, gmailUserEmail);
+    const gmailConfig = config.gmail;
+
+    // Get label ID if configured
+    let labelId: string | null = null;
+    if (account?.gmailLabel) {
+      logMessage(`Searching for emails with label: "${account.gmailLabel}"`);
+      labelId = await getGmailLabelId(gmail, gmailUserEmail, account.gmailLabel);
+      if (labelId) {
+        logMessage(`Found label ID: ${labelId}`);
+      } else {
+        logMessage(`Warning: Could not find label "${account.gmailLabel}", will search without label filter`, 'WARNING');
+      }
+    }
+
+    // Build multiple search strategies (from most specific to least specific)
+    const searchStrategies: string[] = [];
+    
+    // Strategy 1: Full query with label and from:support
+    if (labelId) {
+      searchStrategies.push(`subject:"${gmailConfig.subject}" label:${labelId} from:support`);
+    }
+    
+    // Strategy 2: With label, without from:support
+    if (labelId) {
+      searchStrategies.push(`subject:"${gmailConfig.subject}" label:${labelId}`);
+    }
+    
+    // Strategy 3: Without label, with from:support
+    searchStrategies.push(`subject:"${gmailConfig.subject}" from:support`);
+    
+    // Strategy 4: Just subject
+    searchStrategies.push(`subject:"${gmailConfig.subject}"`);
+    
+    // Strategy 5: Subject without quotes
+    searchStrategies.push(`subject:${gmailConfig.subject}`);
+    
+    // Strategy 6: Keywords from subject
+    const subjectKeywords = gmailConfig.subject.toLowerCase().split(' ');
+    if (subjectKeywords.length > 0) {
+      searchStrategies.push(`${subjectKeywords[0]} ${subjectKeywords[1] || ''} verification code`.trim());
+    }
+
+    logMessage(`Trying ${searchStrategies.length} search strategies...`);
+
+    // Try each search strategy
+    let response: any = null;
+    let successfulQuery = '';
+    
+    for (const searchQuery of searchStrategies) {
+      logMessage(`Trying search query: ${searchQuery}`);
+      
+      try {
+        const testResponse = await gmail.users.messages.list({
+          userId: gmailUserEmail,
+          q: searchQuery,
+          maxResults: 10
+        });
+        
+        if (testResponse.data.messages && testResponse.data.messages.length > 0) {
+          response = testResponse;
+          successfulQuery = searchQuery;
+          logMessage(`✓ Found ${testResponse.data.messages.length} email(s) with query: ${searchQuery}`);
+          break;
+        } else {
+          logMessage(`  No results with this query`);
+        }
+      } catch (listError: any) {
+        logMessage(`  Error with this query: ${listError.message}`, 'WARNING');
+        // Continue to next strategy
+      }
+    }
+
+    // If still no results, try to list recent emails for debugging
+    if (!response || !response.data.messages || response.data.messages.length === 0) {
+      logMessage(`No emails found with any search strategy`, 'WARNING');
+      logMessage('Attempting to list recent emails for debugging...', 'WARNING');
+      
+      try {
+        // List recent emails (last 20) to help diagnose
+        const recentResponse = await gmail.users.messages.list({
+          userId: gmailUserEmail,
+          maxResults: 20
+        });
+        
+        if (recentResponse.data.messages && recentResponse.data.messages.length > 0) {
+          logMessage(`Found ${recentResponse.data.messages.length} recent email(s). Checking subjects...`, 'WARNING');
+          
+          // Get subjects of recent emails
+          const subjects: string[] = [];
+          for (let i = 0; i < Math.min(5, recentResponse.data.messages.length); i++) {
+            try {
+              const msg = await gmail.users.messages.get({
+                userId: gmailUserEmail,
+                id: recentResponse.data.messages[i].id!,
+                format: 'metadata',
+                metadataHeaders: ['Subject', 'From']
+              });
+              
+              const headers = msg.data.payload?.headers || [];
+              const subject = headers.find((h: any) => h.name === 'Subject')?.value || 'No subject';
+              const from = headers.find((h: any) => h.name === 'From')?.value || 'Unknown';
+              subjects.push(`  - Subject: "${subject}" | From: ${from}`);
+            } catch (e) {
+              // Skip if can't get email
+            }
+          }
+          
+          if (subjects.length > 0) {
+            logMessage('Recent email subjects:', 'WARNING');
+            subjects.forEach(s => logMessage(s, 'WARNING'));
+          }
+        }
+      } catch (debugError: any) {
+        logMessage(`Could not list recent emails: ${debugError.message}`, 'WARNING');
+      }
+      
+      logMessage('This could mean:', 'WARNING');
+      logMessage('  - No emails with the specified subject have been received yet', 'WARNING');
+      logMessage('  - The label filter is too restrictive', 'WARNING');
+      logMessage('  - The email is in a different label or folder', 'WARNING');
+      logMessage('  - The subject format has changed', 'WARNING');
+      logMessage(`  - Expected subject: "${gmailConfig.subject}"`, 'WARNING');
+      return null;
+    }
+
+    logMessage(`Found ${response.data.messages.length} email(s) with query: ${successfulQuery}`);
+    logMessage('Checking emails for verification code...');
+
+    // Check emails from most recent to oldest
+    for (const message of response.data.messages) {
+      try {
+        // Get full message
+        const messageResponse = await gmail.users.messages.get({
+          userId: gmailUserEmail,
+          id: message.id!,
+          format: 'full'
+        });
+
+        const messageData = messageResponse.data;
+        
+        // Extract email body
+        let emailBody = '';
+        
+        if (messageData.payload) {
+          // Check if message has parts (multipart)
+          if (messageData.payload.parts) {
+            // Find text/plain or text/html part
+            for (const part of messageData.payload.parts) {
+              if (part.mimeType === 'text/plain' && part.body?.data) {
+                emailBody = decodeEmailBody(part.body);
+                logMessage(`Extracted email body from text/plain part (email ${message.id})`);
+                break;
+              } else if (part.mimeType === 'text/html' && part.body?.data && !emailBody) {
+                // Use HTML as fallback
+                emailBody = decodeEmailBody(part.body);
+                logMessage(`Extracted email body from text/html part (email ${message.id})`);
+              }
+            }
+          } else if (messageData.payload.body?.data) {
+            // Single part message
+            emailBody = decodeEmailBody(messageData.payload.body);
+            logMessage(`Extracted email body from single part message (email ${message.id})`);
+          }
+        }
+
+        if (!emailBody) {
+          logMessage(`Could not extract body from email ${message.id}`, 'WARNING');
+          continue;
+        }
+
+        // Log a preview of the email body for debugging
+        const emailPreview = emailBody.substring(0, 200).replace(/\n/g, ' ');
+        logMessage(`Email body preview: ${emailPreview}...`);
+
+        // Extract verification code
+        const code = extractVerificationCode(emailBody, gmailConfig.codePattern);
+        
+        if (code) {
+          logMessage(`✓ Verification code extracted from email ${message.id}: ${code}`);
+          return code;
+        } else {
+          logMessage(`No verification code found in email ${message.id}`, 'WARNING');
+          logMessage(`  Email body length: ${emailBody.length} characters`);
+          logMessage(`  Pattern used: ${gmailConfig.codePattern || '\\b\\d{4,8}\\b'}`);
+        }
+      } catch (error: any) {
+        logMessage(`Error processing email ${message.id}: ${error.message}`, 'WARNING');
+        continue;
+      }
+    }
+
+    logMessage('Could not extract verification code from any email', 'WARNING');
+    return null;
+  } catch (error: any) {
+    logMessage(`Error getting verification code from Gmail API: ${error.message}`, 'ERROR');
+    return null;
+  }
+}
+
+/**
  * Click on order links that match the provided codes
  */
 /**
@@ -3508,22 +4507,59 @@ export async function performLogin(
     
     try {
       await page.waitForSelector(codeInputSelector, { timeout: 5000 });
-      logMessage('Verification code input detected - opening Gmail to retrieve code...');
+      logMessage('Verification code input detected - waiting 30 seconds for email to arrive...');
 
-      // Immediately open Gmail and search for the verification code
+      // Wait 30 seconds after requesting the code before checking Gmail
+      // This gives time for the email to be sent and delivered
+      await waitRandomTime(30000, 30000); // Fixed 30 seconds wait
+      logMessage('30 seconds elapsed - now checking Gmail for verification code...');
+
+      // Now open Gmail and search for the verification code
       const codeWaitTimeout = gmailConfig.codeWaitTimeout || 30000;
       const maxRetries = gmailConfig.maxCodeRetries || 3;
       let code: string | null = null;
 
       for (let attempt = 1; attempt <= maxRetries; attempt++) {
         logMessage(`Attempting to get verification code from Gmail (attempt ${attempt}/${maxRetries})...`);
-        logMessage('Opening Gmail and searching for verification email...');
         
-        code = await getVerificationCodeFromGmail(browser, config, account);
+        // Primary method: Try Gmail API first (if configured)
+        // Fallback: Use Puppeteer if API is not available or fails
+        // Gmail API can be used independently of Google Drive uploads
+        // Only needs: credentialsPath and gmailUserEmail
+        const credentialsPath = config.googleDrive?.credentialsPath;
+        const gmailUserEmail = config.googleDrive?.gmailUserEmail;
+        const canUseGmailAPI = credentialsPath && 
+                               gmailUserEmail &&
+                               credentialsPath.trim() !== '' &&
+                               gmailUserEmail.trim() !== '';
         
-        if (code) {
-          logMessage(`Verification code retrieved successfully: ${code}`);
-          break;
+        if (canUseGmailAPI) {
+          logMessage('Using Gmail API (primary method) to retrieve verification code...');
+          code = await getVerificationCodeFromGmailAPI(config, account);
+          
+          // If API succeeded, use the code
+          if (code) {
+            logMessage(`Verification code retrieved successfully via Gmail API: ${code}`);
+            break;
+          }
+          
+          // If API failed but we have more attempts, try Puppeteer as fallback
+          if (attempt < maxRetries) {
+            logMessage('Gmail API did not find code, trying Puppeteer as fallback...', 'WARNING');
+            code = await getVerificationCodeFromGmail(browser, config, account);
+            if (code) {
+              logMessage(`Verification code retrieved successfully via Puppeteer (fallback): ${code}`);
+              break;
+            }
+          }
+        } else {
+          // Gmail API not available, use Puppeteer
+          logMessage('Gmail API not configured, using Puppeteer to retrieve verification code...');
+          code = await getVerificationCodeFromGmail(browser, config, account);
+          if (code) {
+            logMessage(`Verification code retrieved successfully via Puppeteer: ${code}`);
+            break;
+          }
         }
 
         if (attempt < maxRetries) {
@@ -3533,6 +4569,12 @@ export async function performLogin(
       }
 
       if (!code) {
+        logMessage('Could not retrieve verification code from Gmail after all attempts', 'ERROR');
+        logMessage('This could mean:', 'ERROR');
+        logMessage('  - No verification email was received yet', 'ERROR');
+        logMessage('  - The email is in a different label or folder', 'ERROR');
+        logMessage('  - The email subject or format has changed', 'ERROR');
+        logMessage('  - Domain-Wide Delegation is not properly configured', 'ERROR');
         return { success: false, error: 'Could not retrieve verification code from Gmail' };
       }
 
@@ -3577,9 +4619,15 @@ export async function performLogin(
       } else {
         return { success: false, error: 'Verification code input not found after returning from Gmail' };
       }
-    } catch (error) {
-      // No verification code required, login might have succeeded
-      logMessage('No verification code required or already logged in');
+    } catch (error: any) {
+      // This catch block handles cases where the code input selector is not found
+      // This could mean: login succeeded without code, or page structure changed
+      logMessage(`Code input selector not found: ${error.message}`, 'WARNING');
+      logMessage('This could mean:', 'WARNING');
+      logMessage('  - Login succeeded without verification code', 'WARNING');
+      logMessage('  - Page structure changed and selector needs update', 'WARNING');
+      logMessage('  - Already logged in from previous session', 'WARNING');
+      // Continue to check login status below
     }
 
     // Verify login was successful

@@ -59,7 +59,10 @@ import {
   displayStatistics,
   type OrderResult,
   initializeLogFile,
-  cleanupBrowserTabs
+  cleanupBrowserTabs,
+  generateUnifiedReport,
+  saveUnifiedReport,
+  uploadLogsAndReportsToGoogleDrive
 } from './main.js';
 
 // Initialize global results array
@@ -325,7 +328,8 @@ async function testIntegrated(): Promise<void> {
     const accountsWithNoOrders: string[] = [];
     
     // Initialize order code tracking at the start (shared across all accounts)
-    const allOrderCodes = getOrderCodesFromConfig(config);
+    // Pass CLI date to getOrderCodesFromConfig so it can find the correct clicked_orders file
+    const allOrderCodes = getOrderCodesFromConfig(config, cliDate || undefined);
     if (allOrderCodes.length > 0) {
       const normalizedCodes = allOrderCodes.map(code => code.trim().toUpperCase());
       (global as any).orderCodeTracking = {
@@ -358,19 +362,75 @@ async function testIntegrated(): Promise<void> {
           await waitRandomTime(2000, 3000);
         }
 
-        // Perform login
-        logMessage(`Attempting login with account: ${account.username}...`);
-        const loginResult = await performLogin(page, browser, account, config);
+        // Perform login with retry logic (4 total attempts: 1 initial + 3 retries)
+        const MAX_LOGIN_ATTEMPTS = 4;
+        let loginResult: { success: boolean; error?: string } = { success: false };
+        let loginSuccessful = false;
         
-        if (!loginResult.success) {
-          logMessage(`✗ LOGIN FAILED for account ${account.username}: ${loginResult.error}`, 'WARNING');
+        for (let attempt = 1; attempt <= MAX_LOGIN_ATTEMPTS; attempt++) {
+          logMessage(`Attempting login with account: ${account.username} (Attempt ${attempt}/${MAX_LOGIN_ATTEMPTS})...`);
+          
+          // Ensure we're on sign_in page before each login attempt
+          const currentUrlBeforeLogin = page.url();
+          const signInUrl = 'https://www.ezcater.com/caterer_portal/sign_in';
+          
+          if (!currentUrlBeforeLogin.includes('/sign_in')) {
+            logMessage(`Navigating to sign_in page before login attempt ${attempt}...`);
+            await page.goto(signInUrl, { waitUntil: 'networkidle2' });
+            await waitRandomTime(2000, 3000);
+          }
+          
+          // Perform logout before retry (except on first attempt if we already logged out)
+          if (attempt > 1) {
+            logMessage(`Performing logout before retry attempt ${attempt}...`);
+            try {
+              await performLogout(page, config, browser);
+              await waitRandomTime(2000, 3000);
+              // Ensure we're on sign_in page after logout
+              const urlAfterLogout = page.url();
+              if (!urlAfterLogout.includes('/sign_in')) {
+                await page.goto(signInUrl, { waitUntil: 'networkidle2' });
+                await waitRandomTime(2000, 3000);
+              }
+            } catch (logoutError: any) {
+              logMessage(`Warning: Error during logout before retry: ${logoutError.message}`, 'WARNING');
+              // Try to navigate to sign_in page directly
+              try {
+                await page.goto(signInUrl, { waitUntil: 'networkidle2' });
+                await waitRandomTime(2000, 3000);
+              } catch (navError) {
+                // Ignore navigation errors
+              }
+            }
+          }
+          
+          loginResult = await performLogin(page, browser, account, config);
+          
+          if (loginResult.success) {
+            logMessage(`✓ Login successful with account: ${account.username} on attempt ${attempt}/${MAX_LOGIN_ATTEMPTS}`);
+            loginSuccessful = true;
+            break; // Exit retry loop on success
+          } else {
+            logMessage(`✗ Login attempt ${attempt}/${MAX_LOGIN_ATTEMPTS} failed for account ${account.username}: ${loginResult.error}`, 'WARNING');
+            
+            // If this is not the last attempt, wait before retrying
+            if (attempt < MAX_LOGIN_ATTEMPTS) {
+              const waitTime = 3000 + (attempt * 1000); // Progressive wait: 3s, 4s, 5s
+              logMessage(`Waiting ${waitTime}ms before retry attempt ${attempt + 1}...`);
+              await waitRandomTime(waitTime, waitTime);
+            }
+          }
+        }
+        
+        // After all attempts, check if login was successful
+        if (!loginSuccessful) {
+          logMessage(`✗ LOGIN FAILED for account ${account.username} after ${MAX_LOGIN_ATTEMPTS} attempts`, 'ERROR');
+          logMessage(`  → Last error: ${loginResult.error}`, 'ERROR');
           logMessage(`  → Skipping account ${account.username} and continuing with next account`, 'WARNING');
           accountsWithLoginIssues.push(account.username);
           logMessage('');
           continue; // Try next account
         }
-        
-        logMessage(`✓ Login successful with account: ${account.username}`);
         await waitRandomTime(2000, 3000);
 
         // Navigate to task URL if needed
@@ -459,7 +519,8 @@ async function testIntegrated(): Promise<void> {
           }
 
           // Get order codes from config (file or list)
-          const orderCodesToFilter = getOrderCodesFromConfig(config);
+          // Pass CLI date to getOrderCodesFromConfig so it can find the correct clicked_orders file
+          const orderCodesToFilter = getOrderCodesFromConfig(config, cliDate || undefined);
           if (orderCodesToFilter.length > 0) {
             // Normalize codes
             const normalizedCodes = orderCodesToFilter.map(code => code.trim().toUpperCase());
@@ -628,6 +689,45 @@ async function testIntegrated(): Promise<void> {
       logMessage('');
     }
     
+    // Step 6: Generate unified report
+    logMessage('');
+    logMessage('Step 6: Generating unified report...');
+    try {
+      const allResults = (global as any).orderResults || [];
+      const orderCodeTracking = (global as any).orderCodeTracking;
+      
+      const reportContent = generateUnifiedReport(
+        allResults,
+        config.task.filterDate,
+        accountsWithNoOrders,
+        accountsWithLoginIssues,
+        orderCodeTracking
+      );
+      
+      const reportPath = saveUnifiedReport(reportContent, config.task.filterDate, config);
+      if (reportPath) {
+        logMessage(`✓ Unified report generated successfully: ${reportPath}`);
+      } else {
+        logMessage('⚠ Warning: Report generation completed but file may not have been saved', 'WARNING');
+      }
+    } catch (reportError: any) {
+      logMessage(`Error generating unified report: ${reportError.message}`, 'ERROR');
+      logMessage('Process will continue despite report generation error', 'WARNING');
+    }
+    logMessage('');
+
+    // Step 7: Upload logs and reports to Google Drive (if enabled)
+    logMessage('');
+    logMessage('Step 7: Uploading logs and reports to Google Drive...');
+    try {
+      await uploadLogsAndReportsToGoogleDrive(config);
+      logMessage('✓ Google Drive upload completed');
+    } catch (uploadError: any) {
+      logMessage(`Error uploading to Google Drive: ${uploadError.message}`, 'ERROR');
+      logMessage('Process will continue despite Google Drive upload error', 'WARNING');
+    }
+    logMessage('');
+
     logMessage('=== INTEGRATED TEST RESULT: SUCCESS ===');
     logMessage('✓ Full process completed successfully');
     logMessage('  → All accounts processed in single browser instance');
