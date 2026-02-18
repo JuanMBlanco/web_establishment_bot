@@ -738,12 +738,6 @@ async function testIntegrated(): Promise<void> {
       profile.protected = false;
       logMessage('Browser protection removed (age check timer can now close it if needed)');
     }
-
-    // Keep browser open for manual inspection
-    logMessage('Browser will remain open for 30 seconds for manual inspection...');
-    logMessage('You can close it manually or wait for auto-close');
-    
-    await waitRandomTime(30000, 30000);
     
   } catch (error: any) {
     logMessage(`INTEGRATED test failed with error: ${error.message}`, 'ERROR');
@@ -758,11 +752,23 @@ async function testIntegrated(): Promise<void> {
     // Close browser at the end
     if (browser) {
       logMessage('Closing browser...');
-      await browser.close();
+      try {
+        await browser.close();
+        logMessage('✓ Browser closed successfully');
+      } catch (closeError: any) {
+        logMessage(`Error closing browser: ${closeError.message}`, 'WARNING');
+      }
     }
     
     logMessage('');
     logMessage('=== INTEGRATED Test Completed ===');
+    logMessage('Waiting 10 seconds before finalizing process...');
+    
+    // Wait 10 seconds before finalizing
+    await waitRandomTime(10000, 10000);
+    
+    logMessage('Process finalized');
+    process.exit(0);
   }
 }
 

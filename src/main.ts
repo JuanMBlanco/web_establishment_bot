@@ -4666,6 +4666,223 @@ export async function performLogin(
         }
         await waitRandomTime(3000, 4000);
         logMessage('Waiting for login to complete after code submission...');
+        
+        // Check if the code was invalid by looking for error element
+        const errorElementSelector = 'span#error-element-code.ulp-input-error-message[data-error-code="invalid-code"]';
+        const errorElement = await page.$(errorElementSelector);
+        
+        // Check if the code input field was cleared (might indicate a new code was sent)
+        let codeFieldCleared = false;
+        try {
+          const codeInputAfterSubmit = await page.$(codeInputSelector);
+          if (codeInputAfterSubmit) {
+            const currentValue = await page.evaluate((el: HTMLInputElement) => el.value, codeInputAfterSubmit);
+            if (!currentValue || currentValue.trim() === '' || currentValue !== code) {
+              codeFieldCleared = true;
+              logMessage(`Code field was cleared or changed (current value: "${currentValue}")`, 'WARNING');
+            }
+          }
+        } catch (e) {
+          // If we can't check the value, continue with other checks
+          logMessage('Could not verify code input value', 'WARNING');
+        }
+        
+        // Only treat as invalid if error element is present
+        if (errorElement) {
+          logMessage('✗ Invalid code error detected - the entered code was incorrect', 'WARNING');
+          
+          // Try to get a new code (with retries)
+          const maxInvalidCodeRetries = 3;
+          let newCode: string | null = null;
+          let codeRetryAttempt = 0;
+          
+          for (codeRetryAttempt = 1; codeRetryAttempt <= maxInvalidCodeRetries; codeRetryAttempt++) {
+            logMessage(`Attempting to retrieve a new verification code (attempt ${codeRetryAttempt}/${maxInvalidCodeRetries})...`);
+            
+            // Clear the code input field
+            logMessage('Clearing the code input field...');
+            const codeInputToClear = await page.$(codeInputSelector);
+            if (codeInputToClear) {
+              await codeInputToClear.click({ clickCount: 3 });
+              await waitRandomTime(200, 500);
+              await page.keyboard.press('Delete');
+              await waitRandomTime(200, 500);
+            }
+            
+            // Wait a bit for a new email to arrive
+            logMessage('Waiting 15 seconds for a new verification email to arrive...');
+            await waitRandomTime(15000, 15000);
+            
+            // Try to get a new code
+            const credentialsPath = config.googleDrive?.credentialsPath;
+            const gmailUserEmail = config.googleDrive?.gmailUserEmail;
+            const canUseGmailAPI = credentialsPath && 
+                                 gmailUserEmail &&
+                                 credentialsPath.trim() !== '' &&
+                                 gmailUserEmail.trim() !== '';
+            
+            if (canUseGmailAPI) {
+              logMessage('Using Gmail API to retrieve new verification code...');
+              newCode = await getVerificationCodeFromGmailAPI(config, account);
+            } else {
+              logMessage('Using Puppeteer to retrieve new verification code...');
+              newCode = await getVerificationCodeFromGmail(browser, config, account);
+            }
+            
+            if (newCode) {
+              logMessage(`New verification code retrieved: ${newCode}`);
+              
+              // Enter the new code
+              const codeInputForNewCode = await page.$(codeInputSelector);
+              if (codeInputForNewCode) {
+                await codeInputForNewCode.click({ clickCount: 3 });
+                await waitRandomTime(200, 500);
+                await codeInputForNewCode.type(newCode, { delay: 100 });
+                logMessage('New verification code entered successfully');
+                await waitRandomTime(1000, 2000);
+                
+                // Submit the new code
+                const continueButtonForNewCode = await page.$(continueButtonSelector);
+                if (continueButtonForNewCode) {
+                  await continueButtonForNewCode.click();
+                  logMessage('Clicked continue button after entering new verification code');
+                } else {
+                  await page.keyboard.press('Enter');
+                  logMessage('Pressed Enter after entering new verification code');
+                }
+                await waitRandomTime(3000, 4000);
+                
+                // Check again if the new code is valid (only check for error element)
+                const errorElementAfterNewCode = await page.$(errorElementSelector);
+                
+                if (!errorElementAfterNewCode) {
+                  logMessage('✓ New verification code accepted - no error detected');
+                  break; // Code is valid, exit retry loop
+                } else {
+                  logMessage(`New code also invalid - error element detected (attempt ${codeRetryAttempt}/${maxInvalidCodeRetries})`, 'WARNING');
+                  if (codeRetryAttempt < maxInvalidCodeRetries) {
+                    logMessage('Will try to get another new code...');
+                  }
+                }
+              } else {
+                logMessage('Code input not found for new code', 'ERROR');
+                break;
+              }
+            } else {
+              logMessage(`Could not retrieve new verification code (attempt ${codeRetryAttempt}/${maxInvalidCodeRetries})`, 'WARNING');
+              if (codeRetryAttempt < maxInvalidCodeRetries) {
+                logMessage('Will retry getting a new code...');
+                await waitRandomTime(5000, 5000);
+              }
+            }
+          }
+          
+          // If we exhausted all retries and still have invalid code, return error to trigger login retry
+          if (codeRetryAttempt > maxInvalidCodeRetries) {
+            const finalErrorCheck = await page.$(errorElementSelector);
+            let finalCodeFieldCleared = false;
+            try {
+              const finalCodeInput = await page.$(codeInputSelector);
+              if (finalCodeInput) {
+                const finalValue = await page.evaluate((el: HTMLInputElement) => el.value, finalCodeInput);
+                if (!finalValue || finalValue.trim() === '') {
+                  finalCodeFieldCleared = true;
+                }
+              }
+            } catch (e) {
+              // Ignore
+            }
+            
+            if (finalErrorCheck || finalCodeFieldCleared) {
+              logMessage('All attempts to get a valid verification code failed', 'ERROR');
+              logMessage('Returning error to trigger login retry...', 'ERROR');
+              return { success: false, error: 'Invalid verification code - all retry attempts exhausted' };
+            }
+          }
+        } else {
+          // No error element - code is valid, but check if field was cleared (might indicate multiple codes sent)
+          let codeFieldCleared = false;
+          try {
+            const codeInputToVerify = await page.$(codeInputSelector);
+            if (codeInputToVerify) {
+              const currentValue = await page.evaluate((el: HTMLInputElement) => el.value, codeInputToVerify);
+              if (!currentValue || currentValue.trim() === '' || currentValue !== code) {
+                codeFieldCleared = true;
+              }
+            }
+          } catch (e) {
+            // If we can't check, assume it's okay
+          }
+          
+          if (!codeFieldCleared) {
+            logMessage('✓ No error element detected and code field still has value - verification code appears to be valid');
+          } else {
+            // Field was cleared but no error - might be a newer code was sent
+            logMessage('⚠ Code field was cleared but no error detected - checking Gmail for newer code (multiple codes may have been sent)...', 'WARNING');
+            
+            // Wait a bit for a new email to arrive
+            logMessage('Waiting 10 seconds for a newer verification email to arrive...');
+            await waitRandomTime(10000, 10000);
+            
+            // Try to get the most recent code
+            const credentialsPath = config.googleDrive?.credentialsPath;
+            const gmailUserEmail = config.googleDrive?.gmailUserEmail;
+            const canUseGmailAPI = credentialsPath && 
+                                 gmailUserEmail &&
+                                 credentialsPath.trim() !== '' &&
+                                 gmailUserEmail.trim() !== '';
+            
+            let newCode: string | null = null;
+            if (canUseGmailAPI) {
+              logMessage('Using Gmail API to retrieve the most recent verification code...');
+              newCode = await getVerificationCodeFromGmailAPI(config, account);
+            } else {
+              logMessage('Using Puppeteer to retrieve the most recent verification code...');
+              newCode = await getVerificationCodeFromGmail(browser, config, account);
+            }
+            
+            if (newCode && newCode !== code) {
+              logMessage(`Newer verification code retrieved: ${newCode} (previous was: ${code})`);
+              
+              // Enter the newer code
+              const codeInputForNewCode = await page.$(codeInputSelector);
+              if (codeInputForNewCode) {
+                await codeInputForNewCode.click({ clickCount: 3 });
+                await waitRandomTime(200, 500);
+                await codeInputForNewCode.type(newCode, { delay: 100 });
+                logMessage('Newer verification code entered successfully');
+                await waitRandomTime(1000, 2000);
+                
+                // Submit the newer code
+                const continueButtonForNewCode = await page.$(continueButtonSelector);
+                if (continueButtonForNewCode) {
+                  await continueButtonForNewCode.click();
+                  logMessage('Clicked continue button after entering newer verification code');
+                } else {
+                  await page.keyboard.press('Enter');
+                  logMessage('Pressed Enter after entering newer verification code');
+                }
+                await waitRandomTime(3000, 4000);
+                
+                // Check if the newer code is valid (only check for error element)
+                const errorElementAfterNewCode = await page.$(errorElementSelector);
+                if (!errorElementAfterNewCode) {
+                  logMessage('✓ Newer verification code accepted - no error detected');
+                } else {
+                  logMessage('✗ Newer code also invalid - error element detected', 'WARNING');
+                  // If newer code is also invalid, return error to trigger login retry
+                  return { success: false, error: 'Invalid verification code - newer code also invalid' };
+                }
+              } else {
+                logMessage('Code input not found for newer code', 'ERROR');
+              }
+            } else if (newCode === code) {
+              logMessage('Most recent code is the same as the one entered - code appears to be valid');
+            } else {
+              logMessage('Could not retrieve a newer verification code - assuming original code is valid', 'WARNING');
+            }
+          }
+        }
       } else {
         return { success: false, error: 'Verification code input not found after returning from Gmail' };
       }
