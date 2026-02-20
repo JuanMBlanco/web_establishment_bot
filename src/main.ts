@@ -1624,7 +1624,7 @@ export function getOrderCodesFromConfig(config: BotConfig, overrideDate?: string
     const targetDate = overrideDate && overrideDate.trim() !== ''
       ? overrideDate
       : (config.task.filterDate && config.task.filterDate.trim() !== ''
-          ? config.task.filterDate
+      ? config.task.filterDate
           : undefined);
     
     // Find the actual file (supports both old and new format with date)
@@ -1633,8 +1633,8 @@ export function getOrderCodesFromConfig(config: BotConfig, overrideDate?: string
     
     if (filePath) {
       logMessage(`Using order codes file: ${filePath}`);
-      const codesFromFile = readOrderCodesFromFile(filePath, targetDate);
-      orderCodes.push(...codesFromFile);
+    const codesFromFile = readOrderCodesFromFile(filePath, targetDate);
+    orderCodes.push(...codesFromFile);
     } else {
       logMessage(`Order codes file not found: ${baseFilePath}`, 'WARNING');
       if (targetDate) {
@@ -3120,7 +3120,44 @@ function getMonthName(month: number): string {
 }
 
 /**
+ * Convert markdown content to plain text
+ * Removes markdown formatting while preserving content structure
+ */
+function markdownToPlainText(markdown: string): string {
+  let text = markdown;
+  
+  // Remove markdown headers (#, ##, ###)
+  text = text.replace(/^#{1,6}\s+/gm, '');
+  
+  // Remove horizontal rules (---)
+  text = text.replace(/^---+$/gm, '');
+  
+  // Remove markdown bold (**text** or __text__)
+  text = text.replace(/\*\*(.+?)\*\*/g, '$1');
+  text = text.replace(/__(.+?)__/g, '$1');
+  
+  // Remove markdown italic (*text* or _text_)
+  text = text.replace(/\*(.+?)\*/g, '$1');
+  text = text.replace(/_(.+?)_/g, '$1');
+  
+  // Remove markdown code blocks (```code```)
+  text = text.replace(/```[\s\S]*?```/g, '');
+  
+  // Remove inline code (`code`)
+  text = text.replace(/`([^`]+)`/g, '$1');
+  
+  // Remove markdown links [text](url) -> text
+  text = text.replace(/\[([^\]]+)\]\([^\)]+\)/g, '$1');
+  
+  // Clean up multiple empty lines (max 2 consecutive)
+  text = text.replace(/\n{3,}/g, '\n\n');
+  
+  return text.trim();
+}
+
+/**
  * Save unified report to file as an additional independent file
+ * Generates both .md and .txt versions
  * Each execution creates a new file with timestamp to avoid overwriting
  * Reports are saved in a separate 'reports' folder
  */
@@ -3133,9 +3170,11 @@ export function saveUnifiedReport(
   // Use dedicated reports folder (separate from logs)
   const reportsDir = 'reports';
   
-  // Generate report filename with date only (format: reporte_unificado_YYYY-MM-DD.md)
-  const reportFileName = `reporte_unificado_${reportDate}.md`;
-  const reportPath = `${reportsDir}/${reportFileName}`;
+  // Generate report filenames with date (format: reporte_unificado_YYYY-MM-DD.md and .txt)
+  const reportFileNameMd = `reporte_unificado_${reportDate}.md`;
+  const reportFileNameTxt = `reporte_unificado_${reportDate}.txt`;
+  const reportPathMd = `${reportsDir}/${reportFileNameMd}`;
+  const reportPathTxt = `${reportsDir}/${reportFileNameTxt}`;
   
   // Ensure reports directory exists
   try {
@@ -3147,17 +3186,28 @@ export function saveUnifiedReport(
     logMessage(`Warning: Could not create reports directory: ${error.message}`, 'WARNING');
   }
   
-  // Write report file (as an additional independent file)
+  // Write markdown report file
   try {
-    writeFileSync(reportPath, reportContent, 'utf8');
-    logMessage(`✓ Unified report saved: ${reportPath}`);
-    logMessage(`  → Report file will be overwritten if run multiple times on the same date`);
-    logMessage(`  → Reports are saved in the 'reports' folder (ignored by git)`);
-    return reportPath;
+    writeFileSync(reportPathMd, reportContent, 'utf8');
+    logMessage(`✓ Unified report (Markdown) saved: ${reportPathMd}`);
   } catch (error: any) {
-    logMessage(`Error saving unified report: ${error.message}`, 'ERROR');
+    logMessage(`Error saving unified report (Markdown): ${error.message}`, 'ERROR');
     return '';
   }
+  
+  // Convert to plain text and write .txt file
+  try {
+    const plainTextContent = markdownToPlainText(reportContent);
+    writeFileSync(reportPathTxt, plainTextContent, 'utf8');
+    logMessage(`✓ Unified report (Plain Text) saved: ${reportPathTxt}`);
+  } catch (error: any) {
+    logMessage(`Error saving unified report (Plain Text): ${error.message}`, 'ERROR');
+    // Continue even if .txt fails, .md is the primary format
+  }
+  
+  logMessage(`  → Report files will be overwritten if run multiple times on the same date`);
+    logMessage(`  → Reports are saved in the 'reports' folder (ignored by git)`);
+  return reportPathMd;
 }
 
 // ============================================================================
@@ -3394,24 +3444,24 @@ export async function uploadLogsAndReportsToGoogleDrive(config: BotConfig): Prom
       logMessage(`Error uploading bot logs: ${error.message}`, 'ERROR');
     }
     
-    // 2. Upload unified reports
+    // 2. Upload unified reports (both .md and .txt)
     try {
       const reportsDir = path.join(projectRoot, 'reports');
       if (existsSync(reportsDir)) {
         const reportsFolderId = await findOrCreateFolder(drive, rootFolderId, folderStructure.reports);
         
-        // Find all report files
+        // Find all report files (both .md and .txt)
         const files = readdirSync(reportsDir);
         const reportFiles = files.filter((file: string) => 
-          file.startsWith('reporte_unificado_') && file.endsWith('.md')
+          file.startsWith('reporte_unificado_') && (file.endsWith('.md') || file.endsWith('.txt'))
         );
         
         for (const fileName of reportFiles) {
           try {
             const localFilePath = path.join(reportsDir, fileName);
             
-            // Extract date from filename: reporte_unificado_YYYY-MM-DD.md
-            const dateMatch = fileName.match(/reporte_unificado_(\d{4}-\d{2}-\d{2})\.md/);
+            // Extract date from filename: reporte_unificado_YYYY-MM-DD.md or .txt
+            const dateMatch = fileName.match(/reporte_unificado_(\d{4}-\d{2}-\d{2})\.(md|txt)/);
             const fileDate = dateMatch ? dateMatch[1] : dateStr;
             
             let targetFolderId = reportsFolderId;
@@ -3421,8 +3471,11 @@ export async function uploadLogsAndReportsToGoogleDrive(config: BotConfig): Prom
               targetFolderId = await findOrCreateFolder(drive, reportsFolderId, fileDate);
             }
             
+            // Determine MIME type based on file extension
+            const mimeType = fileName.endsWith('.md') ? 'text/markdown' : 'text/plain';
+            
             // Always update reports (they may change)
-            await uploadOrUpdateFile(drive, targetFolderId, localFilePath, fileName, 'text/markdown');
+            await uploadOrUpdateFile(drive, targetFolderId, localFilePath, fileName, mimeType);
           } catch (error: any) {
             logMessage(`Error uploading report file ${fileName}: ${error.message}`, 'ERROR');
           }
@@ -4588,9 +4641,9 @@ export async function performLogin(
           code = await getVerificationCodeFromGmailAPI(config, account);
           
           // If API succeeded, use the code
-          if (code) {
+        if (code) {
             logMessage(`Verification code retrieved successfully via Gmail API: ${code}`);
-            break;
+          break;
           }
           
           // If API failed but we have more attempts, try Puppeteer as fallback

@@ -151,7 +151,7 @@ Después de la primera subida, tu Google Drive tendrá esta estructura:
 
 **Se suben:**
 - ✅ `logs/` - Logs del bot (bot_YYYY-MM-DD.log)
-- ✅ `reports/` - Reportes unificados (organizados por fecha si está habilitado)
+- ✅ `reports/` - Reportes unificados en formato Markdown (.md) y texto plano (.txt) (organizados por fecha si está habilitado)
 
 **Estructura con `organizeReportsByDate: true`:**
 ```
@@ -160,9 +160,11 @@ Shared Drive (folderId)/
 │   └── bot_2026-01-15.log
 └── reports/
     ├── 2026-01-15/
-    │   └── reporte_unificado_2026-01-15.md
+    │   ├── reporte_unificado_2026-01-15.md
+    │   └── reporte_unificado_2026-01-15.txt
     └── 2026-01-16/
-        └── reporte_unificado_2026-01-16.md
+        ├── reporte_unificado_2026-01-16.md
+        └── reporte_unificado_2026-01-16.txt
 ```
 
 **Estructura con `organizeReportsByDate: false`:**
@@ -172,7 +174,9 @@ Shared Drive (folderId)/
 │   └── bot_2026-01-15.log
 └── reports/
     ├── reporte_unificado_2026-01-15.md
-    └── reporte_unificado_2026-01-16.md
+    ├── reporte_unificado_2026-01-15.txt
+    ├── reporte_unificado_2026-01-16.md
+    └── reporte_unificado_2026-01-16.txt
 ```
 
 ---
