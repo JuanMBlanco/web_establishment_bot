@@ -10,7 +10,7 @@ import { execSync } from 'child_process';
 import puppeteer from 'puppeteer';
 import { launch } from 'puppeteer-core';
 import yaml from 'js-yaml';
-import { Bot } from 'grammy';
+// Telegram lightweight implementation - no Bot object needed
 import { google } from 'googleapis';
 import { readdirSync } from 'fs';
 
@@ -120,8 +120,10 @@ export interface BotConfig {
 }
 
 let validTokens: Token[] = [];
-let telegramBot: Bot | null = null;
+// Telegram lightweight implementation - only store token and chat IDs (no Bot object)
+let telegramBotToken: string | null = null;
 let telegramChatIds: string[] = [];
+let telegramInitialized: boolean = false;
 let taskInterval: NodeJS.Timeout | null = null;
 let logFileHandle: string | null = null; // Current log file path
 let logQueue: string[] = []; // Queue for async log writing
@@ -679,18 +681,31 @@ export function loadConfig(): BotConfig {
 }
 
 /**
- * Initialize the Telegram bot
+ * Initialize Telegram configuration (lightweight - only reads credentials, no Bot object)
+ * VERSIÓN LIGERA: No mantiene objetos en memoria, solo configuración
  */
-function initTelegramBot(): Bot | null {
+function initTelegramConfig(): boolean {
   try {
+    // Si ya está inicializado, no hacer nada
+    if (telegramInitialized) {
+      return telegramBotToken !== null;
+    }
+    
     const envPath = path.join(projectRoot, 'config', '.env.secrets');
+    
+    if (!existsSync(envPath)) {
+      logMessage('Telegram credentials file not found, notifications disabled', 'WARNING');
+      telegramInitialized = true;
+      return false;
+    }
+    
     const envContent = readFileSync(envPath, 'utf8');
-
     const tokenMatch = envContent.match(/TELEGRAM_API_TOKEN=(.+)/);
 
     if (!tokenMatch) {
-      logMessage('TELEGRAM_API_TOKEN not found in .env.secrets');
-      return null;
+      logMessage('TELEGRAM_API_TOKEN not found in .env.secrets', 'WARNING');
+      telegramInitialized = true;
+      return false;
     }
 
     const chatIdsMatch = envContent.match(/TELEGRAM_CHAT_IDS=(.+)/);
@@ -702,44 +717,146 @@ function initTelegramBot(): Bot | null {
       logMessage('TELEGRAM_CHAT_IDS not found in .env.secrets, notifications will be disabled', 'WARNING');
     }
 
-    const token = tokenMatch[1].trim();
-    logMessage('Initializing Telegram bot...');
-
-    return new Bot(token);
-  } catch (error) {
-    logMessage('Error initializing Telegram bot: ' + error, 'ERROR');
+    telegramBotToken = tokenMatch[1].trim();
+    telegramInitialized = true;
+    logMessage('Telegram configuration loaded successfully');
+    
+    return true;
+  } catch (error: any) {
+    logMessage('Error loading Telegram configuration: ' + error.message, 'ERROR');
+    telegramInitialized = true;
+    return false;
   }
-
-  return null;
 }
 
 /**
- * Send a text message to all configured Telegram chats
+ * Send a text message to all configured Telegram chats using fetch (lightweight - no Bot object)
+ * VERSIÓN LIGERA: No mantiene objetos en memoria, solo hace requests HTTP
  */
 async function sendMessageToTelegram(message: string): Promise<void> {
   try {
-    if (!telegramBot) {
-      logMessage('Telegram bot not initialized');
-      return;
+    // Inicializar configuración si no está inicializada (lazy initialization)
+    if (!telegramInitialized) {
+      initTelegramConfig();
     }
-
+    
+    if (!telegramBotToken) {
+      return; // Silently skip if not configured
+    }
+    
     if (telegramChatIds.length === 0) {
-      logMessage('No Telegram chat IDs configured');
-      return;
+      return; // Silently skip if no chat IDs configured
     }
-
-    logMessage(`Sending message to ${telegramChatIds.length} Telegram chat(s): "${message}"`);
-
+    
+    // URL base de la API de Telegram
+    const apiUrl = `https://api.telegram.org/bot${telegramBotToken}/sendMessage`;
+    
+    // Enviar mensaje a cada chat ID
     for (const chatId of telegramChatIds) {
       try {
-        await telegramBot.api.sendMessage(chatId, message);
-        logMessage(`Message sent to Telegram chat ${chatId} successfully`);
-      } catch (chatError) {
-        logMessage(`Error sending message to Telegram chat ${chatId}: ${chatError}`, 'ERROR');
+        const response = await fetch(apiUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            chat_id: chatId,
+            text: message,
+            parse_mode: 'Markdown'
+          })
+        });
+        
+        if (!response.ok) {
+          const errorText = await response.text();
+          logMessage(`Error sending message to Telegram chat ${chatId}: HTTP ${response.status} - ${errorText}`, 'ERROR');
+        } else {
+          logMessage(`Telegram notification sent to chat ${chatId}`);
+        }
+      } catch (chatError: any) {
+        logMessage(`Error sending message to Telegram chat ${chatId}: ${chatError.message}`, 'ERROR');
       }
     }
-  } catch (error) {
-    logMessage('Error sending message to Telegram: ' + error, 'ERROR');
+  } catch (error: any) {
+    logMessage('Error sending message to Telegram: ' + error.message, 'ERROR');
+  }
+}
+
+/**
+ * Send a file to all configured Telegram chats using fetch (lightweight - no Bot object)
+ * @param filePath - Path to the file to send
+ * @param caption - Optional caption for the file
+ * @returns Promise that resolves when all files are sent
+ */
+export async function sendFileToTelegram(filePath: string, caption?: string): Promise<void> {
+  try {
+    // Inicializar configuración si no está inicializada
+    if (!telegramInitialized) {
+      initTelegramConfig();
+    }
+    
+    if (!telegramBotToken) {
+      return; // Silently skip if not configured
+    }
+    
+    if (telegramChatIds.length === 0) {
+      return; // Silently skip if no chat IDs configured
+    }
+    
+    // Check if file exists
+    if (!existsSync(filePath)) {
+      logMessage(`File not found: ${filePath}`, 'ERROR');
+      return;
+    }
+    
+    const fileName = path.basename(filePath);
+    logMessage(`Sending file to ${telegramChatIds.length} Telegram chat(s): "${fileName}"`);
+    
+    // Read file content
+    const fileContent = readFileSync(filePath);
+    
+    // URL base de la API de Telegram para enviar documentos
+    const apiUrl = `https://api.telegram.org/bot${telegramBotToken}/sendDocument`;
+    
+    // Enviar archivo a cada chat ID
+    for (const chatId of telegramChatIds) {
+      try {
+        // Crear FormData para enviar el archivo
+        const formData = new FormData();
+        formData.append('chat_id', chatId);
+        if (caption) {
+          formData.append('caption', caption);
+        }
+        
+        // Crear Blob o usar Buffer según la versión de Node.js
+        if (typeof Blob !== 'undefined') {
+          // Node.js 18+ - usar Blob
+          const fileBlob = new Blob([fileContent], { type: 'application/octet-stream' });
+          formData.append('document', fileBlob, fileName);
+        } else {
+          // Node.js < 18 - usar Buffer directamente
+          formData.append('document', fileContent, {
+            filename: fileName,
+            contentType: 'application/octet-stream'
+          });
+        }
+        
+        const response = await fetch(apiUrl, {
+          method: 'POST',
+          body: formData
+        });
+        
+        if (!response.ok) {
+          const errorText = await response.text();
+          logMessage(`Error sending file to Telegram chat ${chatId}: HTTP ${response.status} - ${errorText}`, 'ERROR');
+        } else {
+          logMessage(`File sent to Telegram chat ${chatId} successfully: ${fileName}`);
+        }
+      } catch (chatError: any) {
+        logMessage(`Error sending file to Telegram chat ${chatId}: ${chatError.message}`, 'ERROR');
+      }
+    }
+  } catch (error: any) {
+    logMessage('Error sending file to Telegram: ' + error.message, 'ERROR');
   }
 }
 
@@ -5580,13 +5697,12 @@ async function main(): Promise<void> {
 
     mkdirSync(config.paths.dataPath, { recursive: true });
 
-    telegramBot = initTelegramBot();
-
-    if (telegramBot) {
-      logMessage("Telegram bot initialized successfully");
+    // Initialize Telegram configuration (lightweight - only reads credentials, no Bot object)
+    if (initTelegramConfig()) {
+      logMessage("Telegram notifications enabled");
       await sendMessageToTelegram("EZCater Web Establishment Bot initiated");
     } else {
-      logMessage("Telegram bot not initialized, continuing without notifications");
+      logMessage("Telegram notifications disabled, continuing without notifications");
     }
 
     await loadTokens();

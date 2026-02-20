@@ -62,7 +62,8 @@ import {
   cleanupBrowserTabs,
   generateUnifiedReport,
   saveUnifiedReport,
-  uploadLogsAndReportsToGoogleDrive
+  uploadLogsAndReportsToGoogleDrive,
+  sendFileToTelegram
 } from './main.js';
 
 // Initialize global results array
@@ -692,6 +693,7 @@ async function testIntegrated(): Promise<void> {
     // Step 6: Generate unified report
     logMessage('');
     logMessage('Step 6: Generating unified report...');
+    let reportPath: string = '';
     try {
       const allResults = (global as any).orderResults || [];
       const orderCodeTracking = (global as any).orderCodeTracking;
@@ -704,7 +706,7 @@ async function testIntegrated(): Promise<void> {
         orderCodeTracking
       );
       
-      const reportPath = saveUnifiedReport(reportContent, config.task.filterDate, config);
+      reportPath = saveUnifiedReport(reportContent, config.task.filterDate, config);
       if (reportPath) {
         logMessage(`✓ Unified report generated successfully: ${reportPath}`);
       } else {
@@ -732,6 +734,23 @@ async function testIntegrated(): Promise<void> {
     logMessage('✓ Full process completed successfully');
     logMessage('  → All accounts processed in single browser instance');
     logMessage('');
+
+    // Step 8: Send report .txt file to Telegram (if report was generated)
+    if (reportPath) {
+      try {
+        const reportDate = config.task.filterDate || new Date().toISOString().split('T')[0];
+        const reportPathTxt = reportPath.replace('.md', '.txt');
+        
+        logMessage('');
+        logMessage('Step 8: Sending report to Telegram...');
+        await sendFileToTelegram(reportPathTxt, `📄 Reporte Unificado ${reportDate}`);
+        logMessage('✓ Report sent to Telegram successfully');
+      } catch (telegramError: any) {
+        logMessage(`Error sending report to Telegram: ${telegramError.message}`, 'ERROR');
+        logMessage('Process will continue despite Telegram error', 'WARNING');
+      }
+      logMessage('');
+    }
 
     // Unmark browser as protected now that process is complete
     if (profile) {
