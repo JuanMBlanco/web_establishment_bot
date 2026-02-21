@@ -14,7 +14,8 @@
     "test:integrated:setup": "npx tsx src/test-integrated.ts --setup",
     "test:integrated:today": "node run-test-integrated-today.js",
     "test:full": "npx tsx src/test-full-process.ts",
-    "test:gmail-api": "npx tsx src/test-gmail-api.ts"
+    "test:gmail-api": "npx tsx src/test-gmail-api.ts",
+    "test:google-drive": "npx tsx src/test-google-drive.ts"
   },
   "keywords": [],
   "author": "",

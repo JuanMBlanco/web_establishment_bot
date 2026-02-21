@@ -149,7 +149,7 @@ googleDrive:
   # Google Drive Shared Drive ID where logs and reports will be uploaded
   # ⚠️ IMPORTANT: Must be a Shared Drive ID, not a personal folder
   # Get this from the Shared Drive URL: https://drive.google.com/drive/folders/SHARED_DRIVE_ID_HERE
-  folderId: ""  # Set your Shared Drive ID here
+  folderId: "0AOfz8jcRsmNyUk9PVA"  # Set your Shared Drive ID here
   # Enable/disable automatic upload
   enabled: false  # Set to true to enable Google Drive uploads
   # Upload frequency in hours (0 = upload after each execution, 24 = daily, etc.)

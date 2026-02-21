@@ -743,7 +743,7 @@ async function sendMessageToTelegram(message: string): Promise<void> {
     if (!telegramBotToken) {
       return; // Silently skip if not configured
     }
-    
+
     if (telegramChatIds.length === 0) {
       return; // Silently skip if no chat IDs configured
     }
@@ -807,7 +807,7 @@ export async function sendFileToTelegram(filePath: string, caption?: string): Pr
       logMessage(`File not found: ${filePath}`, 'ERROR');
       return;
     }
-    
+
     const fileName = path.basename(filePath);
     logMessage(`Sending file to ${telegramChatIds.length} Telegram chat(s): "${fileName}"`);
     
@@ -3344,7 +3344,7 @@ const GMAIL_CLIENT_CACHE_MS = 5 * 60 * 1000; // 5 minutes
 /**
  * Initialize Google Drive client using Service Account credentials
  */
-async function initGoogleDriveClient(credentialsPath: string): Promise<any> {
+export async function initGoogleDriveClient(credentialsPath: string): Promise<any> {
   try {
     // Use cached client if available and not expired
     const now = Date.now();
@@ -3387,7 +3387,7 @@ async function initGoogleDriveClient(credentialsPath: string): Promise<any> {
 /**
  * Find or create a folder in Google Drive
  */
-async function findOrCreateFolder(drive: any, parentFolderId: string, folderName: string): Promise<string> {
+export async function findOrCreateFolder(drive: any, parentFolderId: string, folderName: string): Promise<string> {
   try {
     // Search for existing folder (support Shared Drives)
     const response = await drive.files.list({
@@ -3427,7 +3427,7 @@ async function findOrCreateFolder(drive: any, parentFolderId: string, folderName
 /**
  * Find a file by name in a folder
  */
-async function findFileByName(drive: any, parentFolderId: string, fileName: string): Promise<string | null> {
+export async function findFileByName(drive: any, parentFolderId: string, fileName: string): Promise<string | null> {
   try {
     const response = await drive.files.list({
       q: `'${parentFolderId}' in parents and name='${fileName}' and trashed=false`,
@@ -3453,7 +3453,7 @@ async function findFileByName(drive: any, parentFolderId: string, fileName: stri
  * Upload or update a file in Google Drive
  * If file exists, updates it; otherwise creates new one
  */
-async function uploadOrUpdateFile(drive: any, parentFolderId: string, localFilePath: string, driveFileName: string, mimeType: string = 'text/plain'): Promise<boolean> {
+export async function uploadOrUpdateFile(drive: any, parentFolderId: string, localFilePath: string, driveFileName: string, mimeType: string = 'text/plain'): Promise<boolean> {
   try {
     if (!existsSync(localFilePath)) {
       logMessage(`File does not exist locally: ${localFilePath}`, 'WARNING');
