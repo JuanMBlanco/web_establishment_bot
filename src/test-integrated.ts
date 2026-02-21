@@ -158,27 +158,64 @@ async function setupMode(): Promise<void> {
     logMessage('  → Navigate to ezCater: https://www.ezcater.com/caterer_portal/sign_in');
     logMessage('  → Configure any accounts or settings you need');
     logMessage('');
-    logMessage('The browser will stay open. Close it manually or press Ctrl+C to exit.');
+    logMessage('The browser will stay open until you manually close it.');
+    logMessage('When you close the browser window, the setup mode will exit automatically.');
+    logMessage('Press Ctrl+C in the terminal to exit the setup mode at any time.');
     logMessage('');
 
-    // Keep browser open indefinitely until user closes it or presses Ctrl+C
-    // Set up signal handlers to close browser gracefully
-    const closeBrowser = async () => {
-      if (browser) {
-        logMessage('');
-        logMessage('Closing browser...');
-        await browser.close();
-        logMessage('Browser closed. Exiting setup mode.');
-        process.exit(0);
+    // Handle browser disconnection (user closes browser manually) - exit process
+    let isExiting = false;
+    browser.on('disconnected', () => {
+      if (isExiting) {
+        return; // Prevent multiple calls
       }
+      isExiting = true;
+      
+      logMessage('');
+      logMessage('Browser was closed manually by user');
+      logMessage('Exiting setup mode...');
+      logMessage('');
+      
+      browser = null; // Clear reference since browser is closed
+      process.exit(0);
+    });
+
+    // Set up signal handlers to exit gracefully when user presses Ctrl+C
+    const exitSetup = async () => {
+      if (isExiting) {
+        return; // Prevent multiple calls
+      }
+      isExiting = true;
+      
+      logMessage('');
+      logMessage('Exiting setup mode...');
+      
+      // Only try to close browser if it's still connected
+      // The script should NOT close the browser automatically, but if user presses Ctrl+C
+      // we should clean up resources
+      if (browser && browser.isConnected()) {
+        try {
+          await browser.close();
+          logMessage('Browser closed.');
+        } catch (closeError: any) {
+          // Browser might already be closed, ignore error
+        }
+      }
+      
+      logMessage('Setup mode exited.');
+      process.exit(0);
     };
 
-    process.on('SIGINT', closeBrowser);
-    process.on('SIGTERM', closeBrowser);
+    process.on('SIGINT', exitSetup);
+    process.on('SIGTERM', exitSetup);
 
-    // Wait indefinitely (user will close browser manually or press Ctrl+C)
-    await new Promise(() => {
+    // Wait indefinitely (user will close browser manually or press Ctrl+C to exit)
+    // The process will exit automatically when browser is closed (handled by disconnected event)
+    await new Promise<void>((resolve) => {
       // This promise never resolves, keeping the process alive
+      // The process will exit when:
+      // 1. User closes browser manually (disconnected event)
+      // 2. User presses Ctrl+C (signal handlers)
     });
 
   } catch (error: any) {
