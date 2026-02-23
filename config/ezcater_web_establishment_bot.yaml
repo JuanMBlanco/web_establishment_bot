@@ -23,14 +23,23 @@ browser:
   # Browser pool size
   poolSize: 3
   # Browser launch arguments
+  # Enhanced anti-detection arguments to help bypass Cloudflare Turnstile and other bot detection
   args:
     - "--restore-last-session"
-    - "--disable-blink-features=AutomationControlled"
+    - "--disable-blink-features=AutomationControlled"  # Removes automation flags
     - "--window-size=1366,768"
     - "--start-maximized"
     - "--disable-session-crashed-bubble" # Prevents the "Chrome didn't shut down correctly" message
     - "--disable-infobars" # Prevents infobars like "Chrome is being controlled"
     - "--no-default-browser-check" # Prevents checking if Chrome is the default browser
+    - "--disable-dev-shm-usage" # Overcome limited resource problems
+    - "--no-sandbox" # Disable sandbox for better compatibility
+    - "--disable-setuid-sandbox" # Disable setuid sandbox
+    - "--disable-web-security" # Disable web security (use with caution)
+    - "--disable-features=IsolateOrigins,site-per-process" # Disable site isolation
+    - "--disable-site-isolation-trials" # Disable site isolation trials
+    - "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" # Realistic user agent
+
 
 # Page viewport configuration
 viewport:

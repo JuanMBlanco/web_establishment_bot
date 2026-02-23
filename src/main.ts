@@ -9,6 +9,11 @@ import os from 'os';
 import { execSync } from 'child_process';
 import puppeteer from 'puppeteer';
 import { launch } from 'puppeteer-core';
+import puppeteerExtra from 'puppeteer-extra';
+import StealthPlugin from 'puppeteer-extra-plugin-stealth';
+
+// Configure puppeteer-extra with stealth plugin to avoid detection
+puppeteerExtra.use(StealthPlugin());
 import yaml from 'js-yaml';
 // Telegram lightweight implementation - no Bot object needed
 import { google } from 'googleapis';
@@ -1029,7 +1034,8 @@ export async function initBrowser(url: string, context: string): Promise<InitBro
 
     const config = loadConfig();
 
-    const browser = await launch({
+    // Use puppeteer-extra with stealth plugin to avoid detection
+    const browser = await puppeteerExtra.launch({
       executablePath: config.browser.executablePath,
       headless: false,
       devtools: false,

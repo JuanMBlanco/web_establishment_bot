@@ -36,6 +36,8 @@
     "grammy": "^1.38.3",
     "js-yaml": "^4.1.1",
     "puppeteer": "^24.30.0",
-    "puppeteer-core": "^24.30.0"
+    "puppeteer-core": "^24.30.0",
+    "puppeteer-extra": "^3.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2"
   }
 }
