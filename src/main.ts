@@ -9,10 +9,22 @@ import os from 'os';
 import { execSync } from 'child_process';
 import puppeteer from 'puppeteer';
 import { launch } from 'puppeteer-core';
-import puppeteerExtra from 'puppeteer-extra';
+import { addExtra } from 'puppeteer-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 
-// Configure puppeteer-extra with stealth plugin to avoid detection
+// Create a wrapper for puppeteer-core that matches VanillaPuppeteer interface
+// Note: createBrowserFetcher is deprecated in newer versions, using minimal interface
+const puppeteerCoreWrapper = {
+  launch,
+  connect: puppeteer.connect.bind(puppeteer),
+  defaultArgs: puppeteer.defaultArgs.bind(puppeteer),
+  executablePath: puppeteer.executablePath.bind(puppeteer),
+  // createBrowserFetcher is deprecated, but required by interface - using a stub
+  createBrowserFetcher: () => { throw new Error('createBrowserFetcher is not available with puppeteer-core'); }
+};
+
+// Configure puppeteer-extra to use puppeteer-core and add stealth plugin
+const puppeteerExtra = addExtra(puppeteerCoreWrapper as any);
 puppeteerExtra.use(StealthPlugin());
 import yaml from 'js-yaml';
 // Telegram lightweight implementation - no Bot object needed
@@ -839,6 +851,7 @@ export async function sendFileToTelegram(filePath: string, caption?: string): Pr
           formData.append('document', fileBlob, fileName);
         } else {
           // Node.js < 18 - usar Buffer directamente
+          // @ts-ignore - FormData in Node.js accepts Buffer with options
           formData.append('document', fileContent, {
             filename: fileName,
             contentType: 'application/octet-stream'
@@ -2542,6 +2555,7 @@ export async function checkForDeliveryIssue(page: puppeteer.Page, orderCode: str
         // Search for ALL issue sections by their container classes (NOT by text)
         // <section class="c-lclPzm c-dpsiik"> contains each issue
         const allIssuesInSection = await page.evaluateHandle((sectionEl) => {
+          if (!sectionEl) return null;
           // Find all sections with class c-lclPzm (each represents an issue)
           const issueSections = sectionEl.querySelectorAll('section.c-lclPzm, section[class*="c-lclPzm"]');
           
@@ -2555,11 +2569,19 @@ export async function checkForDeliveryIssue(page: puppeteer.Page, orderCode: str
         
         if (allIssuesInSection && (await page.evaluate(el => el !== null, allIssuesInSection))) {
           // Verify that the section contains the word "issue" or "issues" to avoid false positives
-          const sectionText = await page.evaluate(el => el.textContent?.toLowerCase() || '', allIssuesInSection);
+          const sectionText = await page.evaluate((el) => {
+            if (!el) return '';
+            return el.textContent?.toLowerCase() || '';
+          }, allIssuesInSection);
           if (sectionText.includes('issue') || sectionText.includes('issues')) {
             issueElement = allIssuesInSection as puppeteer.ElementHandle;
-            const issueCount = await page.evaluate((el) => el.querySelectorAll('section.c-lclPzm, section[class*="c-lclPzm"]').length, issuesHeader);
-            logMessage(`Found ${issueCount} issue section(s) by container class (verified with "issue/issues" text)`);
+            if (issuesHeader) {
+              const issueCount = await page.evaluate((el) => {
+                if (!el) return 0;
+                return el.querySelectorAll('section.c-lclPzm, section[class*="c-lclPzm"]').length;
+              }, issuesHeader);
+              logMessage(`Found ${issueCount} issue section(s) by container class (verified with "issue/issues" text)`);
+            }
           } else {
             logMessage('Found section with issue structure but no "issue/issues" text - skipping (false positive)', 'WARNING');
           }
@@ -4039,11 +4061,11 @@ export async function searchAndClickOrderCodes(
   const notFound: string[] = [];
   const processed: string[] = [];
   
+  // Normalize order codes (uppercase, trimmed) - defined outside try for catch block access
+  const normalizedCodes = orderCodes.map(code => code.trim().toUpperCase());
+  
   try {
     logMessage(`Starting search-based order processing for ${orderCodes.length} codes`);
-    
-    // Normalize order codes (uppercase, trimmed)
-    const normalizedCodes = orderCodes.map(code => code.trim().toUpperCase());
     
     logMessage('Starting individual code searches...');
     
@@ -4852,7 +4874,10 @@ export async function performLogin(
         try {
           const codeInputAfterSubmit = await page.$(codeInputSelector);
           if (codeInputAfterSubmit) {
-            const currentValue = await page.evaluate((el: HTMLInputElement) => el.value, codeInputAfterSubmit);
+            const currentValue = await page.evaluate((el) => {
+              if (!el || !(el instanceof HTMLInputElement)) return '';
+              return el.value;
+            }, codeInputAfterSubmit);
             if (!currentValue || currentValue.trim() === '' || currentValue !== code) {
               codeFieldCleared = true;
               logMessage(`Code field was cleared or changed (current value: "${currentValue}")`, 'WARNING');
@@ -4960,7 +4985,10 @@ export async function performLogin(
             try {
               const finalCodeInput = await page.$(codeInputSelector);
               if (finalCodeInput) {
-                const finalValue = await page.evaluate((el: HTMLInputElement) => el.value, finalCodeInput);
+                const finalValue = await page.evaluate((el) => {
+                  if (!el || !(el instanceof HTMLInputElement)) return '';
+                  return el.value;
+                }, finalCodeInput);
                 if (!finalValue || finalValue.trim() === '') {
                   finalCodeFieldCleared = true;
                 }
@@ -4981,7 +5009,10 @@ export async function performLogin(
           try {
             const codeInputToVerify = await page.$(codeInputSelector);
             if (codeInputToVerify) {
-              const currentValue = await page.evaluate((el: HTMLInputElement) => el.value, codeInputToVerify);
+              const currentValue = await page.evaluate((el) => {
+                if (!el || !(el instanceof HTMLInputElement)) return '';
+                return el.value;
+              }, codeInputToVerify);
               if (!currentValue || currentValue.trim() === '' || currentValue !== code) {
                 codeFieldCleared = true;
               }
