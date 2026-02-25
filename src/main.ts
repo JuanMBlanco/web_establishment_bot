@@ -747,10 +747,119 @@ function initTelegramConfig(): boolean {
 }
 
 /**
+ * Split a long message into chunks that fit Telegram's 4096 character limit
+ * @param message - Message to split
+ * @param maxLength - Maximum length per chunk (default: 4096)
+ * @returns Array of message chunks
+ */
+function splitMessageForTelegram(message: string, maxLength: number = 4096): string[] {
+  if (message.length <= maxLength) {
+    return [message];
+  }
+  
+  const chunks: string[] = [];
+  let currentChunk = '';
+  const lines = message.split('\n');
+  
+  for (const line of lines) {
+    // If adding this line would exceed the limit, save current chunk and start new one
+    if (currentChunk.length + line.length + 1 > maxLength) {
+      if (currentChunk) {
+        chunks.push(currentChunk);
+        currentChunk = '';
+      }
+      
+      // If a single line is longer than maxLength, split it
+      if (line.length > maxLength) {
+        let remainingLine = line;
+        while (remainingLine.length > maxLength) {
+          chunks.push(remainingLine.substring(0, maxLength));
+          remainingLine = remainingLine.substring(maxLength);
+        }
+        currentChunk = remainingLine;
+      } else {
+        currentChunk = line;
+      }
+    } else {
+      currentChunk += (currentChunk ? '\n' : '') + line;
+    }
+  }
+  
+  if (currentChunk) {
+    chunks.push(currentChunk);
+  }
+  
+  return chunks;
+}
+
+/**
+ * Send a text message to a specific Telegram chat ID (ignores .env.secrets chat IDs)
+ * Automatically splits long messages to fit Telegram's 4096 character limit
+ * @param chatId - Specific Telegram chat ID to send message to
+ * @param message - Message text to send
+ */
+export async function sendMessageToTelegramChatId(chatId: string, message: string): Promise<void> {
+  try {
+    // Inicializar configuración si no está inicializada (lazy initialization)
+    if (!telegramInitialized) {
+      initTelegramConfig();
+    }
+    
+    if (!telegramBotToken) {
+      logMessage(`Cannot send Telegram message to ${chatId}: Token not configured`, 'WARNING');
+      return;
+    }
+    
+    // URL base de la API de Telegram
+    const apiUrl = `https://api.telegram.org/bot${telegramBotToken}/sendMessage`;
+    
+    // Split message if it's too long
+    const messageChunks = splitMessageForTelegram(message);
+    
+    try {
+      // Send each chunk as a separate message
+      for (let i = 0; i < messageChunks.length; i++) {
+        const chunk = messageChunks[i];
+        const chunkInfo = messageChunks.length > 1 ? ` (${i + 1}/${messageChunks.length})` : '';
+        
+        const response = await fetch(apiUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            chat_id: chatId,
+            text: chunk,
+            parse_mode: 'Markdown'
+          })
+        });
+        
+        if (!response.ok) {
+          const errorText = await response.text();
+          logMessage(`Error sending message chunk${chunkInfo} to Telegram chat ${chatId}: HTTP ${response.status} - ${errorText}`, 'ERROR');
+        } else {
+          logMessage(`Telegram notification sent to chat ${chatId}${chunkInfo}`);
+        }
+        
+        // Small delay between chunks to avoid rate limiting
+        if (i < messageChunks.length - 1) {
+          await new Promise(resolve => setTimeout(resolve, 500));
+        }
+      }
+    } catch (chatError: any) {
+      logMessage(`Error sending message to Telegram chat ${chatId}: ${chatError.message}`, 'ERROR');
+    }
+  } catch (error: any) {
+    logMessage('Error sending message to Telegram: ' + error.message, 'ERROR');
+  }
+}
+
+/**
  * Send a text message to all configured Telegram chats using fetch (lightweight - no Bot object)
  * VERSIÓN LIGERA: No mantiene objetos en memoria, solo hace requests HTTP
+ * Automatically splits long messages to fit Telegram's 4096 character limit
  */
-async function sendMessageToTelegram(message: string): Promise<void> {
+export async function sendMessageToTelegram(message: string): Promise<void> {
   try {
     // Inicializar configuración si no está inicializada (lazy initialization)
     if (!telegramInitialized) {
@@ -768,26 +877,40 @@ async function sendMessageToTelegram(message: string): Promise<void> {
     // URL base de la API de Telegram
     const apiUrl = `https://api.telegram.org/bot${telegramBotToken}/sendMessage`;
     
+    // Split message if it's too long
+    const messageChunks = splitMessageForTelegram(message);
+    
     // Enviar mensaje a cada chat ID
     for (const chatId of telegramChatIds) {
       try {
-        const response = await fetch(apiUrl, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            chat_id: chatId,
-            text: message,
-            parse_mode: 'Markdown'
-          })
-        });
-        
-        if (!response.ok) {
-          const errorText = await response.text();
-          logMessage(`Error sending message to Telegram chat ${chatId}: HTTP ${response.status} - ${errorText}`, 'ERROR');
-        } else {
-          logMessage(`Telegram notification sent to chat ${chatId}`);
+        // Send each chunk as a separate message
+        for (let i = 0; i < messageChunks.length; i++) {
+          const chunk = messageChunks[i];
+          const chunkInfo = messageChunks.length > 1 ? ` (${i + 1}/${messageChunks.length})` : '';
+          
+          const response = await fetch(apiUrl, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              chat_id: chatId,
+              text: chunk,
+              parse_mode: 'Markdown'
+            })
+          });
+          
+          if (!response.ok) {
+            const errorText = await response.text();
+            logMessage(`Error sending message chunk${chunkInfo} to Telegram chat ${chatId}: HTTP ${response.status} - ${errorText}`, 'ERROR');
+          } else {
+            logMessage(`Telegram notification sent to chat ${chatId}${chunkInfo}`);
+          }
+          
+          // Small delay between chunks to avoid rate limiting
+          if (i < messageChunks.length - 1) {
+            await new Promise(resolve => setTimeout(resolve, 500));
+          }
         }
       } catch (chatError: any) {
         logMessage(`Error sending message to Telegram chat ${chatId}: ${chatError.message}`, 'ERROR');
@@ -4575,6 +4698,212 @@ export async function filterOrdersByDate(page: puppeteer.Page, targetDateStr: st
     logMessage(`Date filtering complete: ${matchedCount} matched, ${hiddenCount} hidden`);
   } catch (error: any) {
     logMessage(`Error filtering by date: ${error.message}`, 'WARNING');
+  }
+}
+
+/**
+ * Detect if Cloudflare Turnstile CAPTCHA is present on the page
+ * Returns an object with isPresent flag and details about the CAPTCHA
+ */
+export async function detectTurnstileCaptcha(page: puppeteer.Page): Promise<{
+  isPresent: boolean;
+  details?: {
+    iframeSrc?: string;
+    widgetId?: string;
+    siteKey?: string;
+    callback?: string;
+  };
+}> {
+  try {
+    // Strategy 1: Look for Turnstile iframe
+    const turnstileIframe = await page.evaluate(() => {
+      const iframes = document.querySelectorAll('iframe');
+      for (const iframe of iframes) {
+        const src = iframe.getAttribute('src') || '';
+        if (src.includes('challenges.cloudflare.com/turnstile') || 
+            src.includes('challenges.cloudflare.com/cdn-cgi/challenge-platform')) {
+          return {
+            src: src,
+            id: iframe.id || '',
+            className: iframe.className || ''
+          };
+        }
+      }
+      return null;
+    });
+
+    if (turnstileIframe) {
+      logMessage(`Cloudflare Turnstile CAPTCHA detected via iframe: ${turnstileIframe.src}`, 'WARNING');
+      return {
+        isPresent: true,
+        details: {
+          iframeSrc: turnstileIframe.src
+        }
+      };
+    }
+
+    // Strategy 2: Look for Turnstile widget elements (cf-turnstile class)
+    const turnstileWidget = await page.evaluate(() => {
+      // Look for elements with cf-turnstile class
+      const widgets = document.querySelectorAll('.cf-turnstile, [class*="cf-turnstile"], [id*="cf-turnstile"]');
+      if (widgets.length > 0) {
+        const widget = widgets[0] as HTMLElement;
+        return {
+          className: widget.className || '',
+          id: widget.id || '',
+          siteKey: widget.getAttribute('data-sitekey') || '',
+          callback: widget.getAttribute('data-callback') || ''
+        };
+      }
+      return null;
+    });
+
+    if (turnstileWidget) {
+      logMessage(`Cloudflare Turnstile CAPTCHA detected via widget element`, 'WARNING');
+      return {
+        isPresent: true,
+        details: {
+          widgetId: turnstileWidget.id,
+          siteKey: turnstileWidget.siteKey,
+          callback: turnstileWidget.callback
+        }
+      };
+    }
+
+    // Strategy 3: Look for Turnstile script tags
+    const turnstileScript = await page.evaluate(() => {
+      const scripts = document.querySelectorAll('script[src]');
+      for (const script of scripts) {
+        const src = script.getAttribute('src') || '';
+        if (src.includes('challenges.cloudflare.com/turnstile')) {
+          return src;
+        }
+      }
+      return null;
+    });
+
+    if (turnstileScript) {
+      logMessage(`Cloudflare Turnstile script detected: ${turnstileScript}`, 'WARNING');
+      return {
+        isPresent: true,
+        details: {
+          iframeSrc: turnstileScript
+        }
+      };
+    }
+
+    // Strategy 4: Look for data-sitekey attributes (common Turnstile attribute)
+    const siteKeyElement = await page.evaluate(() => {
+      const elements = document.querySelectorAll('[data-sitekey]');
+      if (elements.length > 0) {
+        const element = elements[0] as HTMLElement;
+        const siteKey = element.getAttribute('data-sitekey') || '';
+        // Cloudflare Turnstile site keys typically start with specific patterns
+        if (siteKey.length > 0) {
+          return {
+            siteKey: siteKey,
+            tagName: element.tagName,
+            id: element.id || '',
+            className: element.className || ''
+          };
+        }
+      }
+      return null;
+    });
+
+    if (siteKeyElement) {
+      logMessage(`Cloudflare Turnstile CAPTCHA detected via data-sitekey attribute`, 'WARNING');
+      return {
+        isPresent: true,
+        details: {
+          siteKey: siteKeyElement.siteKey,
+          widgetId: siteKeyElement.id
+        }
+      };
+    }
+
+    // No CAPTCHA detected
+    return { isPresent: false };
+
+  } catch (error: any) {
+    logMessage(`Error detecting Turnstile CAPTCHA: ${error.message}`, 'WARNING');
+    return { isPresent: false };
+  }
+}
+
+/**
+ * Wait for Cloudflare Turnstile CAPTCHA to be solved (if present)
+ * This function monitors the CAPTCHA state and waits for it to be completed
+ * Returns true if CAPTCHA was solved, false if timeout or not present
+ */
+export async function waitForTurnstileCompletion(
+  page: puppeteer.Page,
+  timeout: number = 60000
+): Promise<boolean> {
+  try {
+    const captchaDetection = await detectTurnstileCaptcha(page);
+    
+    if (!captchaDetection.isPresent) {
+      logMessage('No Turnstile CAPTCHA detected, proceeding...');
+      return true; // No CAPTCHA to wait for
+    }
+
+    logMessage('Turnstile CAPTCHA detected, waiting for completion...', 'WARNING');
+    
+    const startTime = Date.now();
+    const checkInterval = 1000; // Check every second
+
+    while (Date.now() - startTime < timeout) {
+      // Check if CAPTCHA is still present
+      const currentDetection = await detectTurnstileCaptcha(page);
+      
+      if (!currentDetection.isPresent) {
+        logMessage('Turnstile CAPTCHA appears to be resolved', 'WARNING');
+        await waitRandomTime(1000, 2000); // Wait a bit more to ensure it's fully processed
+        return true;
+      }
+
+      // Check if the iframe/widget has a success state
+      const isCompleted = await page.evaluate(() => {
+        // Look for success indicators in Turnstile iframe
+        const iframes = document.querySelectorAll('iframe');
+        for (const iframe of iframes) {
+          const src = iframe.getAttribute('src') || '';
+          if (src.includes('challenges.cloudflare.com/turnstile')) {
+            // Try to access iframe content (may fail due to CORS)
+            try {
+              const iframeDoc = (iframe as HTMLIFrameElement).contentDocument || 
+                               (iframe as HTMLIFrameElement).contentWindow?.document;
+              if (iframeDoc) {
+                // Look for success indicators
+                const successElements = iframeDoc.querySelectorAll('[class*="success"], [class*="complete"], [data-state="success"]');
+                if (successElements.length > 0) {
+                  return true;
+                }
+              }
+            } catch (e) {
+              // CORS error, can't access iframe content - this is normal
+            }
+          }
+        }
+        return false;
+      });
+
+      if (isCompleted) {
+        logMessage('Turnstile CAPTCHA completion detected', 'WARNING');
+        await waitRandomTime(1000, 2000);
+        return true;
+      }
+
+      await waitRandomTime(checkInterval, checkInterval);
+    }
+
+    logMessage(`Timeout waiting for Turnstile CAPTCHA completion (${timeout}ms)`, 'WARNING');
+    return false;
+
+  } catch (error: any) {
+    logMessage(`Error waiting for Turnstile completion: ${error.message}`, 'WARNING');
+    return false;
   }
 }
 

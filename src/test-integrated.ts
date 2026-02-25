@@ -38,6 +38,7 @@
  * Based on test-login.ts structure but extended with full order processing
  */
 
+import { readFileSync } from 'fs';
 import puppeteer from 'puppeteer';
 import { 
   loadConfig, 
@@ -63,7 +64,10 @@ import {
   generateUnifiedReport,
   saveUnifiedReport,
   uploadLogsAndReportsToGoogleDrive,
-  sendFileToTelegram
+  sendFileToTelegram,
+  detectTurnstileCaptcha,
+  sendMessageToTelegramChatId,
+  sendMessageToTelegram
 } from './main.js';
 
 // Initialize global results array
@@ -323,6 +327,45 @@ async function testIntegrated(): Promise<void> {
     page = browserResult.page;
     const profile = browserResult.profile;
 
+    // Check for CAPTCHA immediately after browser initialization
+    logMessage('Checking for CAPTCHA after browser initialization...');
+    await waitRandomTime(2000, 3000); // Wait for page to load
+    const captchaCheck = await detectTurnstileCaptcha(page);
+    if (captchaCheck.isPresent) {
+      const errorMessage = `🚨 CAPTCHA DETECTED - Process terminated\n\n` +
+        `Cloudflare Turnstile CAPTCHA was detected on the page.\n` +
+        `The process has been terminated to prevent automation detection.\n\n` +
+        `Details:\n` +
+        `- Iframe: ${captchaCheck.details?.iframeSrc || 'N/A'}\n` +
+        `- Widget ID: ${captchaCheck.details?.widgetId || 'N/A'}\n` +
+        `- Site Key: ${captchaCheck.details?.siteKey || 'N/A'}\n` +
+        `- Timestamp: ${new Date().toISOString()}`;
+      
+      logMessage('CAPTCHA detected! Terminating process...', 'ERROR');
+      logMessage(errorMessage, 'ERROR');
+      
+      // Send notification to specific Telegram chat ID
+      const CAPTCHA_ALERT_CHAT_ID = '-4858164979';
+      try {
+        await sendMessageToTelegramChatId(CAPTCHA_ALERT_CHAT_ID, errorMessage);
+        logMessage(`CAPTCHA alert sent to Telegram chat ${CAPTCHA_ALERT_CHAT_ID}`);
+      } catch (telegramError: any) {
+        logMessage(`Error sending CAPTCHA alert to Telegram: ${telegramError.message}`, 'ERROR');
+      }
+      
+      // Close browser and exit
+      if (browser) {
+        try {
+          await browser.close();
+        } catch (closeError) {
+          // Ignore close errors
+        }
+      }
+      
+      process.exit(1);
+    }
+    logMessage('✓ No CAPTCHA detected, proceeding...');
+
     // Mark browser as protected to prevent age check timer from closing it during process
     if (profile) {
       profile.protected = true;
@@ -400,6 +443,45 @@ async function testIntegrated(): Promise<void> {
           await waitRandomTime(2000, 3000);
         }
 
+        // Check for CAPTCHA before attempting login
+        logMessage('Checking for CAPTCHA before login...');
+        const captchaCheckBeforeLogin = await detectTurnstileCaptcha(page);
+        if (captchaCheckBeforeLogin.isPresent) {
+          const errorMessage = `🚨 CAPTCHA DETECTED - Process terminated\n\n` +
+            `Cloudflare Turnstile CAPTCHA was detected before login attempt.\n` +
+            `Account: ${account.username}\n` +
+            `The process has been terminated to prevent automation detection.\n\n` +
+            `Details:\n` +
+            `- Iframe: ${captchaCheckBeforeLogin.details?.iframeSrc || 'N/A'}\n` +
+            `- Widget ID: ${captchaCheckBeforeLogin.details?.widgetId || 'N/A'}\n` +
+            `- Site Key: ${captchaCheckBeforeLogin.details?.siteKey || 'N/A'}\n` +
+            `- Timestamp: ${new Date().toISOString()}`;
+          
+          logMessage('CAPTCHA detected before login! Terminating process...', 'ERROR');
+          logMessage(errorMessage, 'ERROR');
+          
+          // Send notification to specific Telegram chat ID
+          const CAPTCHA_ALERT_CHAT_ID = '-4858164979';
+          try {
+            await sendMessageToTelegramChatId(CAPTCHA_ALERT_CHAT_ID, errorMessage);
+            logMessage(`CAPTCHA alert sent to Telegram chat ${CAPTCHA_ALERT_CHAT_ID}`);
+          } catch (telegramError: any) {
+            logMessage(`Error sending CAPTCHA alert to Telegram: ${telegramError.message}`, 'ERROR');
+          }
+          
+          // Close browser and exit
+          if (browser) {
+            try {
+              await browser.close();
+            } catch (closeError) {
+              // Ignore close errors
+            }
+          }
+          
+          process.exit(1);
+        }
+        logMessage('✓ No CAPTCHA detected, proceeding with login...');
+
         // Perform login with retry logic (4 total attempts: 1 initial + 3 retries)
         const MAX_LOGIN_ATTEMPTS = 4;
         let loginResult: { success: boolean; error?: string } = { success: false };
@@ -416,6 +498,44 @@ async function testIntegrated(): Promise<void> {
             logMessage(`Navigating to sign_in page before login attempt ${attempt}...`);
             await page.goto(signInUrl, { waitUntil: 'networkidle2' });
             await waitRandomTime(2000, 3000);
+          }
+          
+          // Check for CAPTCHA before each login attempt
+          logMessage(`Checking for CAPTCHA before login attempt ${attempt}...`);
+          const captchaCheck = await detectTurnstileCaptcha(page);
+          if (captchaCheck.isPresent) {
+            const errorMessage = `🚨 CAPTCHA DETECTED - Process terminated\n\n` +
+              `Cloudflare Turnstile CAPTCHA was detected during login attempt ${attempt}.\n` +
+              `Account: ${account.username}\n` +
+              `The process has been terminated to prevent automation detection.\n\n` +
+              `Details:\n` +
+              `- Iframe: ${captchaCheck.details?.iframeSrc || 'N/A'}\n` +
+              `- Widget ID: ${captchaCheck.details?.widgetId || 'N/A'}\n` +
+              `- Site Key: ${captchaCheck.details?.siteKey || 'N/A'}\n` +
+              `- Timestamp: ${new Date().toISOString()}`;
+            
+            logMessage('CAPTCHA detected during login! Terminating process...', 'ERROR');
+            logMessage(errorMessage, 'ERROR');
+            
+            // Send notification to specific Telegram chat ID
+            const CAPTCHA_ALERT_CHAT_ID = '-4858164979';
+            try {
+              await sendMessageToTelegramChatId(CAPTCHA_ALERT_CHAT_ID, errorMessage);
+              logMessage(`CAPTCHA alert sent to Telegram chat ${CAPTCHA_ALERT_CHAT_ID}`);
+            } catch (telegramError: any) {
+              logMessage(`Error sending CAPTCHA alert to Telegram: ${telegramError.message}`, 'ERROR');
+            }
+            
+            // Close browser and exit
+            if (browser) {
+              try {
+                await browser.close();
+              } catch (closeError) {
+                // Ignore close errors
+              }
+            }
+            
+            process.exit(1);
           }
           
           // Perform logout before retry (except on first attempt if we already logged out)
@@ -780,8 +900,19 @@ async function testIntegrated(): Promise<void> {
         
         logMessage('');
         logMessage('Step 8: Sending report to Telegram...');
+        
+        // Read the report file content
+        const reportContent = readFileSync(reportPathTxt, 'utf8');
+        
+        // First, send the report content as text message (maintaining file structure)
+        logMessage('Sending report content as text message...');
+        await sendMessageToTelegram(reportContent);
+        
+        // Then, send the file
+        logMessage('Sending report file...');
         await sendFileToTelegram(reportPathTxt, `📄 Reporte Unificado ${reportDate}`);
-        logMessage('✓ Report sent to Telegram successfully');
+        
+        logMessage('✓ Report sent to Telegram successfully (both text and file)');
       } catch (telegramError: any) {
         logMessage(`Error sending report to Telegram: ${telegramError.message}`, 'ERROR');
         logMessage('Process will continue despite Telegram error', 'WARNING');
